@@ -434,7 +434,7 @@ jupyter notebook notebooks/analysis.ipynb
 
 ---
 
-> **Author:** [Your Name]
+> **Author:** [Ruimeng Liu]
 > **Course:** Large Language Models — Final Project
-> **Institution:** [Your University]
+> **Institution:** [Lehigh University]
 > **Date:** 2025
