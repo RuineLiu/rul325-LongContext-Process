@@ -101,15 +101,18 @@ This project investigates the following questions:
 
 ## 3. Dataset
 
-### HotpotQA (Primary Dataset)
+We evaluate on two complementary multi-hop QA benchmarks, totalling **2,000 examples**.
+
+### 3.1 HotpotQA (Primary Benchmark)
 
 | Property | Detail |
 |----------|--------|
 | **Source** | Yang et al. (2018), Stanford / CMU |
 | **Setting** | Distractor setting |
 | **Split used** | Validation |
-| **Size** | 299 examples (randomly sampled) |
-| **Task type** | Multi-hop open-domain QA |
+| **Size** | 1,000 examples (randomly sampled) |
+| **Task type** | 2-hop open-domain QA |
+| **Paragraphs per example** | 10 (2 gold + 8 distractors) |
 | **Link** | https://huggingface.co/datasets/hotpot_qa |
 
 HotpotQA is specifically designed for multi-hop reasoning. Each example consists of:
@@ -126,14 +129,38 @@ Gold paragraphs:
 Answer: 1755
 ```
 
-This structure makes HotpotQA ideal for evaluating iterative retrieval: answering the question requires first identifying *where* Tokarev worked, then retrieving facts about *that institution*.
+### 3.2 MuSiQue (Challenging Benchmark)
 
-### Why HotpotQA?
+| Property | Detail |
+|----------|--------|
+| **Source** | Trivedi et al. (2022), Allen AI |
+| **Setting** | Answerable split |
+| **Split used** | Validation |
+| **Size** | 1,000 examples (randomly sampled) |
+| **Task type** | 2–4-hop open-domain QA |
+| **Paragraphs per example** | 20 (2–4 gold + rest distractors) |
+| **Link** | https://huggingface.co/datasets/dgslibisey/MuSiQue |
 
-- **Directly tests multi-hop reasoning**: exposes the fundamental limitation of single-step RAG
-- **Real Wikipedia passages**: no synthetic data, high ecological validity
-- **Controlled distractor setting**: enables fair comparison across systems
-- **Well-established benchmark**: results are directly comparable to prior work
+MuSiQue extends the difficulty of HotpotQA in two key ways: questions require up to **4 reasoning hops**, and the distractor pool is larger (20 paragraphs vs. 10). Questions are constructed by composing single-hop sub-questions, making them harder to shortcut.
+
+**Hop distribution in our sample**:
+| Hops | Count | % |
+|------|-------|---|
+| 2 | 535 | 53.5% |
+| 3 | 318 | 31.8% |
+| 4 | 147 | 14.7% |
+
+### 3.3 Why These Two Datasets?
+
+| Criterion | HotpotQA | MuSiQue |
+|-----------|----------|---------|
+| Established benchmark | ✅ Widely cited since 2018 | ✅ Recent, increasingly adopted |
+| Real Wikipedia passages | ✅ | ✅ |
+| Fixed 2-hop difficulty | ✅ Good for baseline | ❌ Variable (more realistic) |
+| Variable hop count | ❌ | ✅ Enables difficulty analysis |
+| Distractor density | Medium (8 distractors) | High (16–18 distractors) |
+
+Together, they allow us to measure not only whether Agentic RAG outperforms Naive RAG, but also **how performance gaps widen as reasoning complexity increases**.
 
 ---
 
@@ -159,7 +186,7 @@ We implement and compare **three RAG paradigms** of increasing sophistication, a
 
 ### 4.1 Shared Infrastructure
 
-**Vector Store**: All systems share the same retrieval backend — HotpotQA passages are embedded using `text-embedding-3-small` and indexed in FAISS for efficient similarity search.
+**Vector Store**: All systems share the same retrieval backend — passages from each dataset are embedded using `text-embedding-3-small` and indexed in FAISS for efficient similarity search. Separate indexes are built for HotpotQA and MuSiQue to ensure per-question passage isolation.
 
 **LLM Backend**: `gpt-4o-mini` for generation across all systems, ensuring fair comparison.
 
@@ -283,9 +310,13 @@ Semantic similarity between predicted and gold answers using contextual embeddin
 
 ### 5.3 Analysis Dimensions
 
-**By question type**: HotpotQA categorizes questions as *bridge* (find entity A, then look up A's property) vs *comparison* (compare two entities). We report metrics separately to understand where each system excels.
+**By dataset**: HotpotQA vs. MuSiQue results reported separately to assess generalization across benchmarks.
 
-**Retrieval success rate**: Whether at least one of the two required gold passages appeared in the retrieved context (measures retrieval quality independent of generation quality).
+**By question type (HotpotQA)**: *Bridge* questions (find entity A, then look up A's property) vs. *comparison* questions (compare two entities). We report metrics separately to understand where each system excels.
+
+**By hop count (MuSiQue)**: Results broken down by 2-hop, 3-hop, and 4-hop questions to quantify how performance gaps between systems widen as reasoning complexity increases.
+
+**Retrieval success rate**: Whether all required gold passages appeared in the retrieved context (measures retrieval quality independent of generation quality).
 
 **Failure analysis**: Qualitative categorization of errors — missing evidence, wrong retrieval, correct retrieval but wrong generation, etc.
 
@@ -294,13 +325,13 @@ Semantic similarity between predicted and gold answers using contextual embeddin
 ## 6. Project Structure
 
 ```
-rul325-LongContext-Process/
+rul325-Retrieval-Augmented-Generation-LLM-Agents/
 │
 ├── README.md
 │
 ├── src/
 │   ├── data/
-│   │   └── loader.py               # Load and format HotpotQA records
+│   │   └── prepare_dataset.py      # Download & preprocess HotpotQA + MuSiQue
 │   │
 │   ├── retriever/
 │   │   └── vector_store.py         # FAISS index build & query interface
@@ -326,7 +357,9 @@ rul325-LongContext-Process/
 │
 ├── data/
 │   └── processed/
-│       └── hotpotqa_299.json       # Preprocessed HotpotQA records
+│       ├── hotpotqa_1000.json      # 1,000 HotpotQA records
+│       ├── musique_1000.json       # 1,000 MuSiQue records
+│       └── combined_2000.json      # Combined dataset (2,000 total)
 │
 ├── requirements.txt
 └── .env.example
@@ -364,31 +397,38 @@ cp .env.example .env
 
 ## 8. How to Run
 
-### Step 1 — Build Vector Store
+### Step 1 — Prepare Datasets
 
 ```bash
-python src/retriever/vector_store.py --input data/processed/hotpotqa_299.json --output data/faiss_index/
+python src/data/prepare_dataset.py --n_hotpot 1000 --n_musique 1000 --output_dir data/processed/
+# Outputs: hotpotqa_1000.json, musique_1000.json, combined_2000.json
 ```
 
-### Step 2 — Run All Systems
+### Step 2 — Build Vector Store
+
+```bash
+python src/retriever/vector_store.py --input data/processed/combined_2000.json --output data/faiss_index/
+```
+
+### Step 3 — Run All Systems
 
 ```bash
 # Run individual systems
-python src/rag/naive_rag.py      --data data/processed/hotpotqa_299.json --output results/naive_rag.json
-python src/rag/iterative_rag.py  --data data/processed/hotpotqa_299.json --output results/iterative_rag.json
-python src/rag/agentic_rag.py    --data data/processed/hotpotqa_299.json --output results/agentic_rag.json
+python src/rag/naive_rag.py      --data data/processed/combined_2000.json --output results/naive_rag.json
+python src/rag/iterative_rag.py  --data data/processed/combined_2000.json --output results/iterative_rag.json
+python src/rag/agentic_rag.py    --data data/processed/combined_2000.json --output results/agentic_rag.json
 
 # Or run everything at once
 bash experiments/run_all.sh
 ```
 
-### Step 3 — Evaluate
+### Step 4 — Evaluate
 
 ```bash
 python src/evaluation/metrics.py --results_dir results/
 ```
 
-### Step 4 — Visualize
+### Step 5 — Visualize
 
 ```bash
 python src/visualization/plots.py --results_dir results/
@@ -402,13 +442,21 @@ jupyter notebook notebooks/analysis.ipynb
 
 *To be updated after experiments.*
 
-### Expected Comparison
+### Expected Comparison — HotpotQA (2-hop)
 
 | System | EM | F1 | Avg. Retrieval Steps | Avg. Tokens |
 |--------|----|----|----------------------|-------------|
-| Naive RAG | ~30% | ~40% | 1 | ~800 |
-| Iterative RAG | ~40% | ~52% | 2 | ~1,400 |
-| Agentic RAG | ~50% | ~62% | ~2.5 | ~2,200 |
+| Naive RAG     | ~30% | ~40% | 1    | ~800   |
+| Iterative RAG | ~40% | ~52% | 2    | ~1,400 |
+| Agentic RAG   | ~50% | ~62% | ~2.5 | ~2,200 |
+
+### Expected Comparison — MuSiQue (2–4-hop)
+
+| System | EM (2-hop) | EM (3-hop) | EM (4-hop) |
+|--------|-----------|-----------|-----------|
+| Naive RAG     | ~25% | ~15% | ~8%  |
+| Iterative RAG | ~35% | ~25% | ~15% |
+| Agentic RAG   | ~45% | ~35% | ~22% |
 
 *Numbers are estimates based on related work. Actual results will be reported upon completion.*
 
@@ -430,7 +478,9 @@ jupyter notebook notebooks/analysis.ipynb
 
 7. Yang, Z., Qi, P., Zhang, S., Bengio, Y., Cohen, W., Salakhutdinov, R., & Manning, C. D. (2018). **HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering.** *EMNLP 2018.*
 
-8. Chase, H. (2022). **LangChain.** GitHub. https://github.com/langchain-ai/langchain
+8. Trivedi, H., Balasubramanian, N., Khot, T., & Sabharwal, A. (2022). **MuSiQue: Multihop Questions via Single-hop Question Composition.** *TACL 2022.*
+
+9. Chase, H. (2022). **LangChain.** GitHub. https://github.com/langchain-ai/langchain
 
 ---
 
