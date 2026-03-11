@@ -1,463 +1,440 @@
-# 📄 Lost in the Middle: Replication & Mitigation of Positional Bias in Long-Context LLMs
+# From RAG to Agentic RAG: A Comparative Study on Multi-hop Question Answering
 
 > **Course Final Project — Large Language Models**
-> Topic: Long Context Processing
+> Topic: Retrieval-Augmented Generation & LLM Agents
 
 ---
 
-## 📌 Table of Contents
+## Table of Contents
 
-1. [Overview](#overview)
-2. [Motivation & Background](#motivation--background)
-3. [What's New Compared to the Original Work](#whats-new-compared-to-the-original-work)
-4. [Dataset](#dataset)
-5. [Mitigation Strategies](#mitigation-strategies)
-6. [Evaluation Methods](#evaluation-methods)
-7. [Project Structure](#project-structure)
-8. [Installation & Setup](#installation--setup)
-9. [How to Run](#how-to-run)
-10. [Results & Visualizations](#results--visualizations)
-11. [Discussion](#discussion)
-12. [References](#references)
+1. [Problem Statement](#1-problem-statement)
+2. [Related Work](#2-related-work)
+3. [Dataset](#3-dataset)
+4. [Methodology](#4-methodology)
+5. [Evaluation](#5-evaluation)
+6. [Project Structure](#6-project-structure)
+7. [Installation & Setup](#7-installation--setup)
+8. [How to Run](#8-how-to-run)
+9. [Results](#9-results)
+10. [References](#10-references)
 
 ---
 
-## Overview
+## 1. Problem Statement
 
-This project investigates and mitigates the **"Lost in the Middle"** phenomenon in Large Language Models — the well-documented tendency of LLMs to underperform when relevant information is positioned in the **middle** of a long input context, even when that same information placed at the beginning or end yields correct answers.
+### Background
 
-We:
-1. **Replicate** the original findings of Liu et al. (2023) on modern LLMs (GPT-3.5-turbo, Mistral-7B)
-2. **Propose and evaluate** multiple novel mitigation strategies beyond what the original paper addressed
-3. **Provide a modular, reproducible pipeline** that any researcher can extend
+Retrieval-Augmented Generation (RAG) has become the dominant paradigm for grounding Large Language Model (LLM) responses in external knowledge. By retrieving relevant documents at inference time, RAG reduces hallucination and enables the model to answer questions beyond its training knowledge cutoff.
 
----
-
-## Motivation & Background
-
-### The Core Problem
-
-Modern LLMs support very long contexts (32K–128K tokens), but raw context length does not equal raw reasoning quality. Research has shown that models tend to exhibit a **U-shaped accuracy curve** when relevant information is distributed across a long context:
+However, standard RAG follows a rigid **single-shot retrieval** pipeline:
 
 ```
-Accuracy
-  |
-  |  ★                         ★
-  |    ★                     ★
-  |       ★               ★
-  |          ★           ★
-  |             ★     ★
-  |                ★
-  |________________________________
-     Beginning   Middle       End
-              Document Position
+Query → Retrieve (once) → Concatenate → Generate Answer
 ```
 
-This means information buried in the middle is frequently **ignored or forgotten**, regardless of the model's official context window size. This is a critical limitation for real-world applications like document QA, legal review, and multi-document reasoning.
+This design has a critical limitation: **it assumes a single retrieval step is always sufficient**. For simple, factoid questions (e.g., *"Who directed Inception?"*), this works well. But for **multi-hop questions** that require synthesizing information across multiple documents (e.g., *"What year was the university where Einstein worked founded?"*), a single retrieval pass often misses key intermediate facts, leading to incorrect or incomplete answers.
 
-### Original Paper
+### The Core Challenge
 
-> **Liu, N. F., Lin, K., Hewitt, J., Paranjape, A., Bevilacqua, M., Petroni, F., & Liang, P. (2023).**
-> *Lost in the Middle: How Language Models Use Long Contexts.*
-> arXiv:2307.03172
+Multi-hop reasoning requires the model to:
+1. Identify what is known from the first retrieved document
+2. Formulate a follow-up query based on that partial knowledge
+3. Retrieve additional evidence iteratively
+4. Synthesize all retrieved pieces into a final answer
 
-The original paper used the **NaturalQuestions (NQ)** and **KV-retrieval** datasets, tested GPT-3.5 and Claude 2, and focused primarily on **documenting** the phenomenon rather than solving it.
+Standard RAG cannot do this — it has no mechanism for iterative retrieval or self-directed reasoning.
 
----
+### Research Questions
 
-## What's New Compared to the Original Work
+This project investigates the following questions:
 
-| Dimension | Original Paper (Liu et al., 2023) | Our Work |
-|---|---|---|
-| **Goal** | Document the problem | Document + actively mitigate |
-| **Datasets** | NaturalQuestions, KV-Retrieval | NaturalQuestions + **HotpotQA** (multi-hop) |
-| **Models Tested** | GPT-3.5, Claude 2 | GPT-3.5, Mistral-7B-Instruct |
-| **Mitigation** | None proposed | 3 novel strategies implemented & compared |
-| **Evaluation** | Exact Match only | Exact Match + **F1 + BERTScore** |
-| **Context lengths** | Fixed at 10–20 docs | Variable sweep: 5, 10, 20, 30 documents |
-| **Reproducibility** | No public pipeline | Fully open-source, modular code |
-| **Multi-hop reasoning** | Not tested | Tested on HotpotQA (cross-document reasoning) |
-
-### Our Key Contributions
-
-1. **Three mitigation strategies** implemented and compared head-to-head on the same benchmarks
-2. **Multi-hop extension**: We test the phenomenon on HotpotQA, where answering requires synthesizing *multiple* relevant passages — a more realistic and harder scenario
-3. **Scalability analysis**: We vary the number of distractor documents from 5 to 30 to understand how the U-curve degrades as context grows
-4. **Lightweight wrapper**: Our mitigation pipeline is model-agnostic and API-compatible — it works as a plug-in preprocessing layer for any LLM backend
+- **RQ1**: How does standard RAG perform on multi-hop questions compared to single-hop questions?
+- **RQ2**: Does an Agentic RAG system — capable of iterative retrieval and self-verification — outperform standard RAG on multi-hop QA?
+- **RQ3**: What is the cost-accuracy trade-off between Naive RAG, Iterative RAG, and Agentic RAG in terms of retrieval steps and token consumption?
 
 ---
 
-## Dataset
+## 2. Related Work
 
-### Primary Dataset — NaturalQuestions (NQ) Open
+### 2.1 Retrieval-Augmented Generation (RAG)
+
+**Lewis et al. (2020)** introduced RAG as a general framework combining a parametric memory (the LLM) with a non-parametric memory (a dense retrieval index). The original RAG model retrieves the top-k passages using a DPR retriever and conditions generation on them. This established the retrieve-then-read paradigm that underpins most modern RAG systems.
+
+**Limitation addressed by our work**: The original RAG performs only a single retrieval step, which is insufficient for multi-hop reasoning tasks.
+
+### 2.2 ReAct — Reasoning + Acting
+
+**Yao et al. (2023)** proposed ReAct, a framework that interleaves chain-of-thought reasoning with action execution (e.g., search, lookup). The model generates reasoning traces and actions in a unified sequence, enabling it to dynamically retrieve information based on intermediate conclusions. ReAct demonstrated significant improvements on multi-hop QA benchmarks including HotpotQA.
+
+**Relevance**: Our Agentic RAG implementation adopts the ReAct paradigm, where the LLM agent decides *when* and *what* to retrieve.
+
+### 2.3 Self-RAG
+
+**Asai et al. (2023)** proposed Self-RAG, which trains the model to adaptively retrieve and critically evaluate retrieved passages through special reflection tokens (Retrieve, ISREL, ISSUP, ISUSE). The model learns to retrieve only when necessary and to filter out irrelevant passages.
+
+**Relevance**: Self-RAG motivates our self-verification component in Agentic RAG, where the agent evaluates whether retrieved evidence is sufficient before generating a final answer.
+
+### 2.4 Iterative and Adaptive Retrieval
+
+**Trivedi et al. (2022)** proposed IRCoT (Interleaving Retrieval with Chain-of-Thought), which alternates between generating a reasoning step and retrieving relevant documents. This demonstrates that tightly coupling retrieval with reasoning substantially improves multi-hop performance.
+
+**Shao et al. (2023)** introduced FLARE (Forward-Looking Active REtrieval), which proactively decides when to retrieve by monitoring the model's confidence in its own generation.
+
+**Relevance**: These works validate the iterative retrieval paradigm and inform the design of our Agentic RAG agent.
+
+### 2.5 RAG Survey
+
+**Gao et al. (2023)** provided a comprehensive survey categorizing RAG into Naive RAG, Advanced RAG, and Modular RAG. This taxonomy directly informs our experimental design, where we implement and compare systems across these three categories.
+
+### Summary of Related Work
+
+| Work | Key Contribution | Limitation |
+|------|-----------------|------------|
+| Lewis et al. (2020) | Foundational RAG framework | Single-step retrieval only |
+| Yao et al. (2023) ReAct | Interleaved reasoning and retrieval | Requires capable base LLM |
+| Asai et al. (2023) Self-RAG | Self-reflective retrieval | Requires fine-tuned model |
+| Trivedi et al. (2022) IRCoT | CoT-guided iterative retrieval | Specialized for multi-hop only |
+| Gao et al. (2023) | RAG taxonomy and survey | No empirical comparison |
+| **Ours** | **Systematic comparison of RAG paradigms on multi-hop QA using LangChain** | — |
+
+---
+
+## 3. Dataset
+
+### HotpotQA (Primary Dataset)
 
 | Property | Detail |
-|---|---|
-| **Source** | Google's Natural Questions (open-domain version) |
-| **Size used** | 500 test examples (randomly sampled) |
-| **Format** | Question + gold answer + distractor passages |
-| **Why** | Directly used in the original paper, allows apples-to-apples comparison |
-| **Link** | https://huggingface.co/datasets/nq_open |
-
-Each example is structured as a question paired with one gold-answer passage and K−1 distractor passages (retrieved via BM25 from Wikipedia). We systematically vary the position of the gold passage among K total passages.
-
-### Secondary Dataset — HotpotQA
-
-| Property | Detail |
-|---|---|
-| **Source** | HotpotQA (distractor setting) |
-| **Size used** | 300 test examples |
-| **Format** | Multi-hop question + 10 candidate paragraphs (2 gold, 8 distractor) |
-| **Why** | Tests whether positional bias worsens when *multiple* relevant passages are needed |
+|----------|--------|
+| **Source** | Yang et al. (2018), Stanford / CMU |
+| **Setting** | Distractor setting |
+| **Split used** | Validation |
+| **Size** | 299 examples (randomly sampled) |
+| **Task type** | Multi-hop open-domain QA |
 | **Link** | https://huggingface.co/datasets/hotpot_qa |
 
-HotpotQA extends our analysis beyond single-passage retrieval into genuine multi-document reasoning, which is closer to real-world use cases.
+HotpotQA is specifically designed for multi-hop reasoning. Each example consists of:
+- A question requiring **two-hop reasoning** across two Wikipedia paragraphs
+- **10 candidate paragraphs**: 2 gold (containing the answer evidence) + 8 distractors
+- Gold answer and supporting fact annotations
 
-### Dataset Preprocessing
+**Example**:
+```
+Question: "In what year was the university where Sergei Tokarev was a professor founded?"
+Gold paragraphs:
+  [1] "Sergei Tokarev ... professor at Lomonosov Moscow State University ..."
+  [2] "Lomonosov Moscow State University ... founded in 1755 ..."
+Answer: 1755
+```
 
-All raw datasets are preprocessed using the `src/data/prepare_dataset.py` script, which:
-- Samples the specified number of examples
-- Builds context windows by inserting gold passage(s) at controlled positions (indices 0 through K−1)
-- Serializes each constructed input as a JSON record for reproducibility
+This structure makes HotpotQA ideal for evaluating iterative retrieval: answering the question requires first identifying *where* Tokarev worked, then retrieving facts about *that institution*.
+
+### Why HotpotQA?
+
+- **Directly tests multi-hop reasoning**: exposes the fundamental limitation of single-step RAG
+- **Real Wikipedia passages**: no synthetic data, high ecological validity
+- **Controlled distractor setting**: enables fair comparison across systems
+- **Well-established benchmark**: results are directly comparable to prior work
 
 ---
 
-## Mitigation Strategies
+## 4. Methodology
 
-We implement and evaluate **three strategies**, each representing a different approach to solving the problem.
+### System Overview
+
+We implement and compare **three RAG paradigms** of increasing sophistication, all built with LangChain:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Query (Question)                     │
+└───────────────────┬─────────────────────────────────────┘
+                    │
+        ┌───────────┼───────────┐
+        ▼           ▼           ▼
+   Naive RAG   Iterative   Agentic RAG
+               RAG
+        │           │           │
+        ▼           ▼           ▼
+    Answer      Answer      Answer
+```
+
+### 4.1 Shared Infrastructure
+
+**Vector Store**: All systems share the same retrieval backend — HotpotQA passages are embedded using `text-embedding-3-small` and indexed in FAISS for efficient similarity search.
+
+**LLM Backend**: `gpt-4o-mini` for generation across all systems, ensuring fair comparison.
+
+**LangChain**: Used as the unified orchestration framework.
+
+### 4.2 Baseline — Naive RAG
+
+The standard single-shot retrieve-then-read pipeline.
+
+```
+Query
+  │
+  ▼
+Retrieve top-k passages (k=3) from FAISS
+  │
+  ▼
+Concatenate passages + question into prompt
+  │
+  ▼
+LLM generates answer
+```
+
+**Implementation**: `LangChain RetrievalQA` chain with a custom prompt template.
+
+**Expected limitation**: For multi-hop questions, the first retrieval may return only one of the two required gold passages, leading to incomplete answers.
+
+### 4.3 System 2 — Iterative RAG
+
+Extends Naive RAG by performing multiple fixed rounds of retrieval before answering.
+
+```
+Query
+  │
+  ▼
+Round 1: Retrieve top-k → extract intermediate facts
+  │
+  ▼
+Round 2: Re-query with updated context → retrieve more
+  │
+  ▼
+(repeat N rounds)
+  │
+  ▼
+LLM generates final answer from accumulated context
+```
+
+**Implementation**: `LangChain SequentialChain` with N=2 retrieval rounds.
+
+**Expected improvement**: Two retrieval rounds allow the system to first identify an intermediate entity, then look it up explicitly.
+
+### 4.4 System 3 — Agentic RAG (Core Contribution)
+
+A LangChain ReAct agent that autonomously decides when and what to retrieve, and verifies its own answer before committing.
+
+```
+Query
+  │
+  ▼
+Agent thinks: "What do I need to find?"
+  │
+  ▼
+Agent calls Search tool → retrieves documents
+  │
+  ▼
+Agent thinks: "Do I have enough to answer?"
+     ├─ No → reformulate query → Search again
+     └─ Yes → generate answer
+              │
+              ▼
+         Self-verify: "Does the answer follow from the evidence?"
+              ├─ No → retrieve more
+              └─ Yes → return final answer
+```
+
+**Tools available to the agent**:
+- `DocumentSearch`: Semantic search over the FAISS vector store
+- `AnswerVerifier`: Checks whether the current evidence supports a candidate answer
+
+**Implementation**: `LangChain AgentExecutor` with `ReAct` prompt template and custom tools.
+
+### System Comparison
+
+| Property | Naive RAG | Iterative RAG | Agentic RAG |
+|----------|-----------|---------------|-------------|
+| Retrieval steps | 1 (fixed) | N (fixed) | Variable (dynamic) |
+| Query reformulation | No | No | Yes |
+| Self-verification | No | No | Yes |
+| LangChain component | RetrievalQA | SequentialChain | AgentExecutor |
+| Token overhead | 1× | ~2× | Variable |
+| Framework | LangChain | LangChain | LangChain |
 
 ---
 
-### Strategy 1 — Relevance-Based Reordering (Rerank)
+## 5. Evaluation
 
-**Core idea:** Before feeding documents to the LLM, re-rank them by relevance to the query using a lightweight cross-encoder. Place the most relevant documents at the **beginning and end** of the context, pushing the least relevant to the middle.
+### 5.1 Accuracy Metrics
 
-**Implementation:**
-- Cross-encoder model: `cross-encoder/ms-marco-MiniLM-L-6-v2` (via `sentence-transformers`)
-- Each document is scored against the query
-- Documents are reordered so that top-scoring docs appear at positions 0 and K−1, the second tier at positions 1 and K−2, and so on (a "relevance sandwich" layout)
-
-**Expected effect:** Moves the gold passage toward the edges, where LLMs pay more attention, without modifying any content.
-
-```
-Before reordering:  [D3, D1, GOLD, D5, D2]   ← gold stuck in middle
-After reordering:   [GOLD, D5, D3, D1, D2]   ← gold moved to front
-```
-
----
-
-### Strategy 2 — Sandwich Prompting (Repetition)
-
-**Core idea:** Repeat the most likely relevant passage(s) **both at the beginning and the end** of the context, surrounding all other documents. This exploits the model's known primacy and recency biases.
-
-**Implementation:**
-- The top-1 passage by BM25 score is duplicated
-- It appears as the first and last document in the context
-- A brief system instruction is added: *"The key information is provided at the start and end of the context for emphasis."*
-
-**Expected effect:** Guarantees that the most important information is seen at a high-attention position. Increases token count slightly (one passage duplicated).
-
-```
-Context layout: [GOLD_COPY | D1, D2, D3, D4 | GOLD_COPY]
-```
-
----
-
-### Strategy 3 — Hierarchical Compression (Summarize-then-Answer)
-
-**Core idea:** Instead of feeding all raw documents directly, first use the LLM to compress each document into a 1–2 sentence summary. Then feed only the summaries as the final context for answering.
-
-**Implementation:**
-- Each document is individually summarized using a cheap model call: *"Summarize this passage in 1-2 sentences, focusing on information relevant to: {question}"*
-- The summaries (much shorter) are then fed as the context to the final answering call
-- Total context length is reduced by ~80%, effectively eliminating the "middle" problem
-
-**Expected effect:** Dramatically reduces context length, removes the positional bias problem, but trades off fine-grained detail. Tests the accuracy-efficiency frontier.
-
-```
-Phase 1: Doc1 → Summary1, Doc2 → Summary2, ..., DocK → SummaryK
-Phase 2: [Summary1, Summary2, ..., SummaryK] → Answer
-```
-
----
-
-### Strategies At a Glance
-
-| Strategy | Modifies Content? | Extra API Calls | Token Overhead | Target Problem |
-|---|---|---|---|---|
-| Baseline | No | 0 | 0 | — |
-| Rerank | No | 0 | 0 | Position of gold passage |
-| Sandwich | No | 0 | +1 passage | Recency/primacy attention |
-| Compression | Yes (lossy) | +K calls | −80% | Context length itself |
-
----
-
-## Evaluation Methods
-
-We use three complementary metrics to capture different aspects of answer quality.
-
-### 1. Exact Match (EM)
-
-The strictest metric. The model's answer is considered correct only if it **exactly matches** (case-insensitive, punctuation-stripped) the gold answer string.
-
+**Exact Match (EM)**
 ```
 EM = 1  if  normalize(predicted) == normalize(gold)
 EM = 0  otherwise
+(normalization: lowercase, strip punctuation and articles)
 ```
 
-Used as the primary metric for NaturalQuestions, consistent with the original paper.
-
-### 2. Token-Level F1
-
-A softer metric that measures word overlap between the predicted and gold answers. Particularly useful when the model produces a correct but slightly differently phrased answer.
-
+**Token-level F1**
 ```
-F1 = 2 × (Precision × Recall) / (Precision + Recall)
-
-where:
-  Precision = |predicted_tokens ∩ gold_tokens| / |predicted_tokens|
-  Recall    = |predicted_tokens ∩ gold_tokens| / |gold_tokens|
+F1 = 2 × Precision × Recall / (Precision + Recall)
+where overlap is computed on whitespace-tokenized strings
 ```
 
-### 3. BERTScore (Semantic Similarity)
+**BERTScore**
+Semantic similarity between predicted and gold answers using contextual embeddings, capturing cases where surface form differs but meaning is preserved.
 
-Captures **semantic** rather than lexical similarity by comparing contextual embeddings of predicted and gold answers using a pretrained BERT model. Important when surface-form variation is expected (e.g., "the United States" vs. "the US").
+### 5.2 Efficiency Metrics
 
-```
-BERTScore-F1 = harmonic mean of precision and recall
-               computed over token-level cosine similarities
-               using bert-base-uncased embeddings
-```
+| Metric | Description |
+|--------|-------------|
+| Avg. retrieval steps | Mean number of retrieval calls per question |
+| Avg. tokens consumed | Mean total tokens (prompt + completion) per question |
+| Latency | Mean wall-clock time per question |
 
-### Evaluation Dimensions
+### 5.3 Analysis Dimensions
 
-Beyond per-example scoring, we analyze results across two axes:
+**By question type**: HotpotQA categorizes questions as *bridge* (find entity A, then look up A's property) vs *comparison* (compare two entities). We report metrics separately to understand where each system excels.
 
-**Axis 1 — Position:** Accuracy as a function of where the gold passage appears in the context (position 0 through K−1). Produces the signature U-curve plot.
+**Retrieval success rate**: Whether at least one of the two required gold passages appeared in the retrieved context (measures retrieval quality independent of generation quality).
 
-**Axis 2 — Context Length:** Accuracy as a function of total number of documents K (5, 10, 20, 30). Shows how each strategy degrades as context grows.
+**Failure analysis**: Qualitative categorization of errors — missing evidence, wrong retrieval, correct retrieval but wrong generation, etc.
 
 ---
 
-## Project Structure
+## 6. Project Structure
 
 ```
-lost-in-the-middle/
+rul325-LongContext-Process/
 │
 ├── README.md
 │
 ├── src/
 │   ├── data/
-│   │   ├── prepare_dataset.py        # Download & preprocess NQ and HotpotQA
-│   │   └── context_builder.py        # Insert gold passage at controlled positions
+│   │   └── loader.py               # Load and format HotpotQA records
 │   │
-│   ├── models/
-│   │   ├── llm_interface.py          # Unified API wrapper (OpenAI / HuggingFace)
-│   │   └── reranker.py               # Cross-encoder scoring (sentence-transformers)
+│   ├── retriever/
+│   │   └── vector_store.py         # FAISS index build & query interface
 │   │
-│   ├── strategies/
-│   │   ├── baseline.py               # Raw context, no modification
-│   │   ├── rerank.py                 # Strategy 1: Relevance-based reordering
-│   │   ├── sandwich.py               # Strategy 2: Sandwich prompting
-│   │   └── compression.py            # Strategy 3: Hierarchical compression
+│   ├── rag/
+│   │   ├── naive_rag.py            # System 1: Naive RAG (RetrievalQA)
+│   │   ├── iterative_rag.py        # System 2: Iterative RAG (SequentialChain)
+│   │   └── agentic_rag.py          # System 3: Agentic RAG (AgentExecutor)
 │   │
 │   ├── evaluation/
-│   │   ├── metrics.py                # EM, F1, BERTScore implementations
-│   │   └── evaluate.py               # Run evaluation over all strategies
+│   │   └── metrics.py              # EM, F1, BERTScore, efficiency metrics
 │   │
 │   └── visualization/
-│       ├── plot_ucurve.py            # Position vs. accuracy plots
-│       └── plot_comparison.py        # Strategy comparison bar charts
+│       └── plots.py                # Result charts and comparison figures
 │
 ├── experiments/
-│   ├── run_baseline.sh
-│   ├── run_rerank.sh
-│   ├── run_sandwich.sh
-│   └── run_compression.sh
+│   └── run_all.sh                  # End-to-end experiment runner
 │
-├── results/
-│   ├── baseline_nq.json
-│   ├── rerank_nq.json
-│   ├── sandwich_nq.json
-│   └── compression_nq.json
+├── results/                        # JSON output files per system
 │
 ├── notebooks/
-│   └── analysis.ipynb                # End-to-end analysis and plots
+│   └── analysis.ipynb              # Interactive analysis and visualization
+│
+├── data/
+│   └── processed/
+│       └── hotpotqa_299.json       # Preprocessed HotpotQA records
 │
 ├── requirements.txt
-└── .env.example                      # API key configuration
+└── .env.example
 ```
 
 ---
 
-## Installation & Setup
+## 7. Installation & Setup
 
 ### Prerequisites
 
 - Python 3.9+
-- An OpenAI API key (for GPT-3.5-turbo)
-- Optional: HuggingFace account token (for Mistral-7B)
+- OpenAI API key
 
 ### Steps
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/lost-in-the-middle.git
-cd lost-in-the-middle
+git clone <repo-url>
+cd rul325-LongContext-Process
 
-# 2. Create a virtual environment
+# 2. Create virtual environment
 python -m venv venv
-source venv/bin/activate  # on Windows: venv\Scripts\activate
+source venv/bin/activate   # Windows: venv\Scripts\activate
 
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Configure API keys
+# 4. Configure API key
 cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY
-```
-
-### Key Dependencies (`requirements.txt`)
-
-```
-openai>=1.0.0
-transformers>=4.35.0
-sentence-transformers>=2.2.2
-datasets>=2.14.0
-evaluate>=0.4.0
-bert-score>=0.3.13
-rank-bm25>=0.2.2
-matplotlib>=3.7.0
-seaborn>=0.12.0
-pandas>=2.0.0
-numpy>=1.24.0
-tqdm>=4.65.0
-python-dotenv>=1.0.0
+# Add your OPENAI_API_KEY to .env
 ```
 
 ---
 
-## How to Run
+## 8. How to Run
 
-### Step 1 — Prepare Data
+### Step 1 — Build Vector Store
 
 ```bash
-python src/data/prepare_dataset.py \
-  --dataset nq \
-  --n_samples 500 \
-  --n_docs 20 \
-  --output_dir data/processed/
+python src/retriever/vector_store.py --input data/processed/hotpotqa_299.json --output data/faiss_index/
 ```
 
-### Step 2 — Run Baseline (Replication)
+### Step 2 — Run All Systems
 
 ```bash
-python src/evaluation/evaluate.py \
-  --strategy baseline \
-  --dataset data/processed/nq_500.json \
-  --model gpt-3.5-turbo \
-  --output results/baseline_nq.json
+# Run individual systems
+python src/rag/naive_rag.py      --data data/processed/hotpotqa_299.json --output results/naive_rag.json
+python src/rag/iterative_rag.py  --data data/processed/hotpotqa_299.json --output results/iterative_rag.json
+python src/rag/agentic_rag.py    --data data/processed/hotpotqa_299.json --output results/agentic_rag.json
+
+# Or run everything at once
+bash experiments/run_all.sh
 ```
 
-### Step 3 — Run Mitigation Strategies
+### Step 3 — Evaluate
 
 ```bash
-# Strategy 1: Reranking
-python src/evaluation/evaluate.py --strategy rerank --dataset data/processed/nq_500.json
-
-# Strategy 2: Sandwich
-python src/evaluation/evaluate.py --strategy sandwich --dataset data/processed/nq_500.json
-
-# Strategy 3: Compression
-python src/evaluation/evaluate.py --strategy compression --dataset data/processed/nq_500.json
+python src/evaluation/metrics.py --results_dir results/
 ```
 
-### Step 4 — Generate Plots
+### Step 4 — Visualize
 
 ```bash
-# U-curve plot (position vs. accuracy)
-python src/visualization/plot_ucurve.py --results_dir results/
-
-# Strategy comparison
-python src/visualization/plot_comparison.py --results_dir results/
-```
-
-Or run the full interactive analysis in:
-
-```bash
+python src/visualization/plots.py --results_dir results/
+# or
 jupyter notebook notebooks/analysis.ipynb
 ```
 
 ---
 
-## Results & Visualizations
+## 9. Results
 
-### Expected Result 1 — U-Shaped Curve (Replication)
+*To be updated after experiments.*
 
-The baseline should reproduce the U-curve: accuracy is highest when the gold document is at position 0 (beginning) or position K−1 (end), and drops significantly in the middle positions.
+### Expected Comparison
 
-### Expected Result 2 — Strategy Comparison Table
+| System | EM | F1 | Avg. Retrieval Steps | Avg. Tokens |
+|--------|----|----|----------------------|-------------|
+| Naive RAG | ~30% | ~40% | 1 | ~800 |
+| Iterative RAG | ~40% | ~52% | 2 | ~1,400 |
+| Agentic RAG | ~50% | ~62% | ~2.5 | ~2,200 |
 
-| Strategy | EM (Overall) | EM (Middle) | F1 | BERTScore | Tokens Used |
-|---|---|---|---|---|---|
-| Baseline | ~45% | ~30% | ~52% | ~82% | 1× |
-| Rerank | ~52% | ~46% | ~59% | ~85% | 1× |
-| Sandwich | ~50% | ~44% | ~57% | ~84% | ~1.1× |
-| Compression | ~48% | ~47% | ~54% | ~80% | ~0.3× |
-
-> Note: Exact numbers will depend on your sampled subset, model version, and temperature settings. The table above is an expected approximation based on related work.
-
-### Key Expected Findings
-
-- **Reranking** provides the best overall accuracy improvement with zero token overhead — it is the most practical strategy
-- **Sandwich prompting** effectively eliminates the middle dip but slightly reduces overall accuracy due to redundant content confusing the model in some cases
-- **Compression** nearly eliminates positional bias (the U-curve flattens) but loses fine-grained detail, hurting F1 slightly
-- All three strategies meaningfully close the gap between middle-position and edge-position accuracy, reducing the delta by 40–60%
+*Numbers are estimates based on related work. Actual results will be reported upon completion.*
 
 ---
 
-## Discussion
+## 10. References
 
-### Why Does This Happen?
+1. Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V., Goyal, N., ... & Kiela, D. (2020). **Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks.** *NeurIPS 2020.*
 
-The positional bias is believed to stem from a combination of:
+2. Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., & Cao, Y. (2023). **ReAct: Synergizing Reasoning and Acting in Language Models.** *ICLR 2023.*
 
-1. **Training data distribution**: Most training documents are structured so the key answer is at the start or end (e.g., abstracts, conclusions, introductory paragraphs)
-2. **Attention decay**: Transformer attention, while theoretically global, shows empirical decay in information propagation over very long sequences
-3. **Instruction following bias**: Models are trained to prioritize the beginning of the user turn, inadvertently de-prioritizing mid-context content
+3. Asai, A., Wu, Z., Wang, Y., Sil, A., & Hajishirzi, H. (2023). **Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection.** *ICLR 2024.*
 
-### Limitations of Our Work
+4. Trivedi, H., Balasubramanian, N., Khot, T., & Sabharwal, A. (2022). **Interleaving Retrieval with Chain-of-Thought Reasoning for Knowledge-Intensive Multi-Step Questions.** *ACL 2023.*
 
-- We test only on English QA benchmarks; multilingual behavior may differ
-- GPT-3.5's exact context handling is opaque (closed-source); Mistral results are more interpretable
-- Compression strategy uses the same model for summarization and answering, which may introduce a self-consistency bias
-- BERTScore results depend on the reference BERT model version
+5. Shao, Z., Gong, Y., Shen, Y., Huang, M., Dolan, B., Jiao, J., & Chen, W. (2023). **Enhancing Retrieval-Augmented Large Language Models with Iterative Retrieval-Generation Synergy.** *EMNLP 2023.*
 
-### Future Work
+6. Gao, Y., Xiong, Y., Gao, X., Jia, K., Pan, J., Bi, Y., ... & Wang, H. (2023). **Retrieval-Augmented Generation for Large Language Models: A Survey.** *arXiv:2312.10997.*
 
-- Apply mitigations to longer contexts (64K+ tokens) using Claude 3 or GPT-4-turbo
-- Explore **fine-tuning** approaches that teach the model to uniformly attend to all context positions
-- Test on domain-specific corpora (legal contracts, medical records) where the middle-loss problem has direct economic consequences
+7. Yang, Z., Qi, P., Zhang, S., Bengio, Y., Cohen, W., Salakhutdinov, R., & Manning, C. D. (2018). **HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering.** *EMNLP 2018.*
+
+8. Chase, H. (2022). **LangChain.** GitHub. https://github.com/langchain-ai/langchain
 
 ---
 
-## References
-
-1. Liu, N. F., Lin, K., Hewitt, J., Paranjape, A., Bevilacqua, M., Petroni, F., & Liang, P. (2023). **Lost in the Middle: How Language Models Use Long Contexts.** arXiv:2307.03172.
-
-2. Kwiatkowski, T., et al. (2019). **Natural Questions: A Benchmark for Question Answering Research.** TACL.
-
-3. Yang, Z., et al. (2018). **HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering.** EMNLP.
-
-4. Reimers, N., & Gurevych, I. (2019). **Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks.** EMNLP.
-
-5. Zhang, T., et al. (2020). **BERTScore: Evaluating Text Generation with BERT.** ICLR.
-
-6. Nogueira, R., & Cho, K. (2019). **Passage Re-ranking with BERT.** arXiv:1901.04085.
-
----
-
-> **Authors:** [Your Name(s)]
+> **Author:** [Your Name]
 > **Course:** Large Language Models — Final Project
 > **Institution:** [Your University]
 > **Date:** 2025
