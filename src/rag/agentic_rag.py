@@ -45,10 +45,10 @@ from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from langchain.agents import AgentExecutor, create_react_agent
-from langchain.callbacks.base import BaseCallbackHandler
 from langchain.prompts import PromptTemplate
-from langchain.schema import Document
 from langchain.tools import tool
+from langchain_community.callbacks import get_openai_callback
+from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI
 from tqdm import tqdm
 
@@ -66,6 +66,7 @@ TOP_K          = 3
 MAX_ITERATIONS = 8   # safety cap — prevents runaway agents
 
 # ReAct prompt — must include {tools}, {tool_names}, {input}, {agent_scratchpad}
+# {max_iterations} is pre-filled via .partial() before passing to create_react_agent
 REACT_PROMPT = PromptTemplate.from_template("""\
 You are an expert question-answering agent. Your goal is to answer the question \
 by retrieving evidence from a document store and verifying your answer before \
@@ -96,49 +97,24 @@ Question: {input}
 
 
 # ---------------------------------------------------------------------------
-# Token-counting callback
-# ---------------------------------------------------------------------------
-
-class _TokenCounter(BaseCallbackHandler):
-    def __init__(self) -> None:
-        self.prompt_tokens:     int = 0
-        self.completion_tokens: int = 0
-
-    @property
-    def total_tokens(self) -> int:
-        return self.prompt_tokens + self.completion_tokens
-
-    def on_llm_end(self, response: Any, **kwargs: Any) -> None:  # noqa: ANN401
-        try:
-            usage = response.llm_output.get("token_usage", {})
-            self.prompt_tokens     += usage.get("prompt_tokens",     0)
-            self.completion_tokens += usage.get("completion_tokens", 0)
-        except AttributeError:
-            pass
-
-    def reset(self) -> None:
-        self.prompt_tokens     = 0
-        self.completion_tokens = 0
-
-
-# ---------------------------------------------------------------------------
 # Per-question tool factory
 # ---------------------------------------------------------------------------
-# LangChain @tool functions cannot easily carry per-call state, so we build
-# fresh tool closures for each question, bound to:
-#   - the current question_id (for passage isolation)
-#   - a shared retrieved_docs list (so verify_answer can see what was found)
-#   - a retrieval_step counter
+# LangChain @tool closures are built fresh for each question, binding:
+#   - the current question_id   (passage isolation)
+#   - a shared retrieved_docs list (verify_answer reads what search found)
+#   - a retrieval step counter
 
 def make_tools(
     store:          VectorStoreIndex,
     question_id:    str,
     k:              int,
-    retrieved_docs: List[Document],   # mutated in place
-    step_counter:   List[int],        # [count] — list so closure can mutate
+    retrieved_docs: List[Document],   # mutated in place across tool calls
+    step_counter:   List[int],        # [count] — mutable via list
     verify_llm:     ChatOpenAI,
 ) -> list:
     """Return [search_documents, verify_answer] bound to the current question."""
+
+    seen_ids: set[str] = set()   # tracks passage_id to avoid duplicate storage
 
     @tool
     def search_documents(query: str) -> str:
@@ -150,12 +126,12 @@ def make_tools(
         docs = store.search(question_id, query, k=k)
         step_counter[0] += 1
 
-        # Merge into running context (de-dup by passage_id)
-        seen = {d.metadata["passage_id"] for d in retrieved_docs}
+        # Accumulate unique passages into the shared list
         for doc in docs:
-            if doc.metadata["passage_id"] not in seen:
+            pid = doc.metadata.get("passage_id", doc.page_content[:80])
+            if pid not in seen_ids:
                 retrieved_docs.append(doc)
-                seen.add(doc.metadata["passage_id"])
+                seen_ids.add(pid)
 
         if not docs:
             return "No relevant passages found."
@@ -198,16 +174,16 @@ def make_tools(
 # ---------------------------------------------------------------------------
 
 def run_one(
-    record:      Dict[str, Any],
-    store:       VectorStoreIndex,
-    llm:         ChatOpenAI,
-    verify_llm:  ChatOpenAI,
-    counter:     _TokenCounter,
-    k:           int,
+    record:     Dict[str, Any],
+    store:      VectorStoreIndex,
+    llm:        ChatOpenAI,
+    verify_llm: ChatOpenAI,
+    k:          int,
 ) -> Dict[str, Any]:
     qid      = record["id"]
     question = record["question"]
 
+    # Fresh state per question
     retrieved_docs: List[Document] = []
     step_counter:   List[int]      = [0]
 
@@ -226,15 +202,13 @@ def run_one(
         verbose=False,
     )
 
-    counter.reset()
     t0 = time.perf_counter()
-
-    try:
-        output = executor.invoke({"input": question})
-        predicted = output.get("output", "").strip()
-    except Exception as exc:  # noqa: BLE001
-        predicted = f"ERROR: {exc}"
-
+    with get_openai_callback() as cb:
+        try:
+            output    = executor.invoke({"input": question})
+            predicted = output.get("output", "").strip()
+        except Exception as exc:  # noqa: BLE001
+            predicted = f"ERROR: {exc}"
     latency = time.perf_counter() - t0
 
     retrieved = [
@@ -255,9 +229,9 @@ def run_one(
         "n_hops":             record["n_hops"],
         "predicted_answer":   predicted,
         "retrieval_steps":    step_counter[0],
-        "tokens_prompt":      counter.prompt_tokens,
-        "tokens_completion":  counter.completion_tokens,
-        "tokens_total":       counter.total_tokens,
+        "tokens_prompt":      cb.prompt_tokens,
+        "tokens_completion":  cb.completion_tokens,
+        "tokens_total":       cb.total_tokens,
         "latency_s":          round(latency, 3),
         "retrieved_passages": retrieved,
     }
@@ -296,28 +270,31 @@ def main(
         return
 
     store      = VectorStoreIndex(index_dir)
-    counter    = _TokenCounter()
-    llm        = ChatOpenAI(model=LLM_MODEL, temperature=0, callbacks=[counter])
-    verify_llm = ChatOpenAI(model=LLM_MODEL, temperature=0, callbacks=[counter])
+    llm        = ChatOpenAI(model=LLM_MODEL, temperature=0)
+    verify_llm = ChatOpenAI(model=LLM_MODEL, temperature=0)
 
     results = list(existing_results)
+    new_results: List[Dict[str, Any]] = []
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     for record in tqdm(records_todo, desc="[AgenticRAG]"):
-        result = run_one(record, store, llm, verify_llm, counter, k)
+        result = run_one(record, store, llm, verify_llm, k)
         results.append(result)
+        new_results.append(result)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
 
-    n = len(results)
-    avg_tokens  = sum(r["tokens_total"]    for r in results) / n
-    avg_steps   = sum(r["retrieval_steps"] for r in results) / n
-    avg_latency = sum(r["latency_s"]       for r in results) / n
-    print(f"\n[AgenticRAG] Done — {n} questions")
-    print(f"  Avg retrieval steps   : {avg_steps:.2f}")
-    print(f"  Avg tokens / question : {avg_tokens:.0f}")
-    print(f"  Avg latency / question: {avg_latency:.2f}s")
-    print(f"  Output saved → {output_path}")
+    # ── Summary (current run only) ──────────────────────────────────────────
+    if new_results:
+        n = len(new_results)
+        avg_tokens  = sum(r["tokens_total"]    for r in new_results) / n
+        avg_steps   = sum(r["retrieval_steps"] for r in new_results) / n
+        avg_latency = sum(r["latency_s"]       for r in new_results) / n
+        print(f"\n[AgenticRAG] Done — {n} new questions processed")
+        print(f"  Avg retrieval steps   : {avg_steps:.2f}")
+        print(f"  Avg tokens / question : {avg_tokens:.0f}")
+        print(f"  Avg latency / question: {avg_latency:.2f}s")
+    print(f"  Total saved: {len(results)} | Output → {output_path}")
 
 
 if __name__ == "__main__":

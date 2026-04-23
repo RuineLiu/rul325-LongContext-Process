@@ -41,9 +41,9 @@ import time
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from langchain.callbacks.base import BaseCallbackHandler
 from langchain.prompts import PromptTemplate
-from langchain.schema import Document
+from langchain_community.callbacks import get_openai_callback
+from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 from tqdm import tqdm
@@ -94,33 +94,7 @@ Answer:""",
 
 
 # ---------------------------------------------------------------------------
-# Token-counting callback (identical to naive_rag.py)
-# ---------------------------------------------------------------------------
-
-class _TokenCounter(BaseCallbackHandler):
-    def __init__(self) -> None:
-        self.prompt_tokens:     int = 0
-        self.completion_tokens: int = 0
-
-    @property
-    def total_tokens(self) -> int:
-        return self.prompt_tokens + self.completion_tokens
-
-    def on_llm_end(self, response: Any, **kwargs: Any) -> None:  # noqa: ANN401
-        try:
-            usage = response.llm_output.get("token_usage", {})
-            self.prompt_tokens     += usage.get("prompt_tokens",     0)
-            self.completion_tokens += usage.get("completion_tokens", 0)
-        except AttributeError:
-            pass
-
-    def reset(self) -> None:
-        self.prompt_tokens     = 0
-        self.completion_tokens = 0
-
-
-# ---------------------------------------------------------------------------
-# Helper
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _format_passages(docs: List[Document]) -> str:
@@ -135,7 +109,8 @@ def _dedup(docs: List[Document]) -> List[Document]:
     seen: set[str] = set()
     out:  List[Document] = []
     for doc in docs:
-        pid = doc.metadata.get("passage_id", doc.page_content[:40])
+        # passage_id is always set by VectorStoreIndex — use it as the key
+        pid = doc.metadata.get("passage_id") or doc.page_content[:80]
         if pid not in seen:
             seen.add(pid)
             out.append(doc)
@@ -147,12 +122,11 @@ def _dedup(docs: List[Document]) -> List[Document]:
 # ---------------------------------------------------------------------------
 
 def run_one(
-    record:  Dict[str, Any],
-    store:   VectorStoreIndex,
-    llm:     ChatOpenAI,
-    counter: _TokenCounter,
-    k:       int,
-    rounds:  int,
+    record: Dict[str, Any],
+    store:  VectorStoreIndex,
+    llm:    ChatOpenAI,
+    k:      int,
+    rounds: int,
 ) -> Dict[str, Any]:
     qid      = record["id"]
     question = record["question"]
@@ -160,35 +134,38 @@ def run_one(
     extraction_chain = EXTRACTION_PROMPT | llm | StrOutputParser()
     answer_chain     = ANSWER_PROMPT     | llm | StrOutputParser()
 
-    counter.reset()
     t0 = time.perf_counter()
 
-    # ── Iterative retrieval ─────────────────────────────────────────────
-    all_docs:     List[Document] = []
-    current_query: str           = question
-    retrieval_steps: int         = 0
+    with get_openai_callback() as cb:
+        # ── Iterative retrieval ─────────────────────────────────────────
+        all_docs:      List[Document] = []
+        current_query: str            = question
+        retrieval_steps: int          = 0
 
-    for round_idx in range(rounds):
-        new_docs = store.search(qid, current_query, k=k)
-        retrieval_steps += 1
-        all_docs = _dedup(all_docs + new_docs)
+        for round_idx in range(rounds):
+            new_docs = store.search(qid, current_query, k=k)
+            retrieval_steps += 1
+            all_docs = _dedup(all_docs + new_docs)
 
-        # Only reformulate between rounds (not after the last one)
-        if round_idx < rounds - 1:
-            passages_text = _format_passages(all_docs)
-            intermediate  = extraction_chain.invoke({
-                "passages": passages_text,
-                "question": question,
-            }).strip()
-            # New query = original question + the extracted intermediate fact
-            current_query = f"{question} {intermediate}"
+            # Reformulate query between rounds (not after the last one)
+            if round_idx < rounds - 1:
+                passages_text = _format_passages(all_docs)
+                intermediate  = extraction_chain.invoke({
+                    "passages": passages_text,
+                    "question": question,
+                }).strip()
 
-    # ── Final answer ────────────────────────────────────────────────────
-    context   = _format_passages(all_docs)
-    predicted = answer_chain.invoke({
-        "context":  context,
-        "question": question,
-    }).strip()
+                # Guard: only extend query if extraction returned something useful
+                if intermediate and intermediate.lower() != "i don't know":
+                    current_query = f"{question} {intermediate}"
+                # else: keep original question for next round
+
+        # ── Final answer ────────────────────────────────────────────────
+        context   = _format_passages(all_docs)
+        predicted = answer_chain.invoke({
+            "context":  context,
+            "question": question,
+        }).strip()
 
     latency = time.perf_counter() - t0
 
@@ -210,9 +187,9 @@ def run_one(
         "n_hops":             record["n_hops"],
         "predicted_answer":   predicted,
         "retrieval_steps":    retrieval_steps,
-        "tokens_prompt":      counter.prompt_tokens,
-        "tokens_completion":  counter.completion_tokens,
-        "tokens_total":       counter.total_tokens,
+        "tokens_prompt":      cb.prompt_tokens,
+        "tokens_completion":  cb.completion_tokens,
+        "tokens_total":       cb.total_tokens,
         "latency_s":          round(latency, 3),
         "retrieved_passages": retrieved,
     }
@@ -251,28 +228,31 @@ def main(
         print("[IterativeRAG] Nothing to do.")
         return
 
-    store   = VectorStoreIndex(index_dir)
-    counter = _TokenCounter()
-    llm     = ChatOpenAI(model=LLM_MODEL, temperature=0, callbacks=[counter])
+    store = VectorStoreIndex(index_dir)
+    llm   = ChatOpenAI(model=LLM_MODEL, temperature=0)
 
     results = list(existing_results)
+    new_results: List[Dict[str, Any]] = []
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     for record in tqdm(records_todo, desc="[IterativeRAG]"):
-        result = run_one(record, store, llm, counter, k, rounds)
+        result = run_one(record, store, llm, k, rounds)
         results.append(result)
+        new_results.append(result)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
 
-    n = len(results)
-    avg_tokens   = sum(r["tokens_total"]    for r in results) / n
-    avg_steps    = sum(r["retrieval_steps"] for r in results) / n
-    avg_latency  = sum(r["latency_s"]       for r in results) / n
-    print(f"\n[IterativeRAG] Done — {n} questions")
-    print(f"  Avg retrieval steps   : {avg_steps:.1f}")
-    print(f"  Avg tokens / question : {avg_tokens:.0f}")
-    print(f"  Avg latency / question: {avg_latency:.2f}s")
-    print(f"  Output saved → {output_path}")
+    # ── Summary (current run only) ──────────────────────────────────────────
+    if new_results:
+        n = len(new_results)
+        avg_tokens  = sum(r["tokens_total"]    for r in new_results) / n
+        avg_steps   = sum(r["retrieval_steps"] for r in new_results) / n
+        avg_latency = sum(r["latency_s"]       for r in new_results) / n
+        print(f"\n[IterativeRAG] Done — {n} new questions processed")
+        print(f"  Avg retrieval steps   : {avg_steps:.1f}")
+        print(f"  Avg tokens / question : {avg_tokens:.0f}")
+        print(f"  Avg latency / question: {avg_latency:.2f}s")
+    print(f"  Total saved: {len(results)} | Output → {output_path}")
 
 
 if __name__ == "__main__":

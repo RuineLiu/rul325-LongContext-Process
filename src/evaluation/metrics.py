@@ -274,13 +274,28 @@ def print_comparison(all_evals: List[Dict[str, Any]]) -> None:
 # ---------------------------------------------------------------------------
 
 def _discover_result_files(results_dir: str) -> List[Tuple[str, str]]:
-    """Return [(system_name, filepath)] for JSON files in results_dir."""
-    pairs = []
-    for fname in sorted(os.listdir(results_dir)):
-        if fname.endswith(".json") and fname != "evaluation_summary.json":
-            name = fname.replace(".json", "")
-            pairs.append((name, os.path.join(results_dir, fname)))
-    return pairs
+    """Return [(system_name, filepath)] for JSON files in results_dir.
+
+    Known system names are sorted in comparison order (naive → iterative → agentic).
+    Any additional files are appended alphabetically after the known ones.
+    """
+    PRIORITY = ["naive_rag", "iterative_rag", "agentic_rag"]
+
+    all_files = {
+        fname.replace(".json", ""): os.path.join(results_dir, fname)
+        for fname in os.listdir(results_dir)
+        if fname.endswith(".json") and fname != "evaluation_summary.json"
+    }
+
+    ordered = []
+    for name in PRIORITY:
+        if name in all_files:
+            ordered.append((name, all_files.pop(name)))
+    # Append any remaining files alphabetically
+    for name in sorted(all_files):
+        ordered.append((name, all_files[name]))
+
+    return ordered
 
 
 def main(

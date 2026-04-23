@@ -26,9 +26,9 @@ import time
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from langchain.callbacks.base import BaseCallbackHandler
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
+from langchain_community.callbacks import get_openai_callback
 from langchain_openai import ChatOpenAI
 from tqdm import tqdm
 
@@ -57,33 +57,6 @@ Passages:
 Question: {question}
 Answer:"""
 
-# ---------------------------------------------------------------------------
-# Token-counting callback
-# ---------------------------------------------------------------------------
-
-class _TokenCounter(BaseCallbackHandler):
-    """Accumulate token usage reported by the OpenAI chat completion."""
-
-    def __init__(self) -> None:
-        self.prompt_tokens:     int = 0
-        self.completion_tokens: int = 0
-
-    @property
-    def total_tokens(self) -> int:
-        return self.prompt_tokens + self.completion_tokens
-
-    def on_llm_end(self, response: Any, **kwargs: Any) -> None:  # noqa: ANN401
-        try:
-            usage = response.llm_output.get("token_usage", {})
-            self.prompt_tokens     += usage.get("prompt_tokens",     0)
-            self.completion_tokens += usage.get("completion_tokens", 0)
-        except AttributeError:
-            pass
-
-    def reset(self) -> None:
-        self.prompt_tokens     = 0
-        self.completion_tokens = 0
-
 
 # ---------------------------------------------------------------------------
 # Single-question inference
@@ -93,8 +66,7 @@ def run_one(
     record: Dict[str, Any],
     store:  VectorStoreIndex,
     chain:  RetrievalQA,
-    counter: _TokenCounter,
-    k: int,
+    k:      int,
 ) -> Dict[str, Any]:
     """Run Naive RAG on a single question record and return a result dict."""
     qid      = record["id"]
@@ -103,9 +75,9 @@ def run_one(
     # Swap the retriever to this question's passage pool
     chain.retriever = store.as_retriever(question_id=qid, k=k)
 
-    counter.reset()
     t0 = time.perf_counter()
-    output = chain.invoke({"query": question})
+    with get_openai_callback() as cb:
+        output = chain.invoke({"query": question})
     latency = time.perf_counter() - t0
 
     predicted = output.get("result", "").strip()
@@ -122,18 +94,18 @@ def run_one(
     ]
 
     return {
-        "id":               qid,
-        "dataset":          record["dataset"],
-        "question":         question,
-        "gold_answer":      record["gold_answer"],
-        "all_answers":      record["all_answers"],
-        "n_hops":           record["n_hops"],
-        "predicted_answer": predicted,
-        "retrieval_steps":  1,
-        "tokens_prompt":    counter.prompt_tokens,
-        "tokens_completion": counter.completion_tokens,
-        "tokens_total":     counter.total_tokens,
-        "latency_s":        round(latency, 3),
+        "id":                 qid,
+        "dataset":            record["dataset"],
+        "question":           question,
+        "gold_answer":        record["gold_answer"],
+        "all_answers":        record["all_answers"],
+        "n_hops":             record["n_hops"],
+        "predicted_answer":   predicted,
+        "retrieval_steps":    1,
+        "tokens_prompt":      cb.prompt_tokens,
+        "tokens_completion":  cb.completion_tokens,
+        "tokens_total":       cb.total_tokens,
+        "latency_s":          round(latency, 3),
         "retrieved_passages": retrieved,
     }
 
@@ -143,12 +115,12 @@ def run_one(
 # ---------------------------------------------------------------------------
 
 def main(
-    data_path:  str,
-    index_dir:  str,
+    data_path:   str,
+    index_dir:   str,
     output_path: str,
-    k:          int,
-    limit:      Optional[int],
-    resume:     bool,
+    k:           int,
+    limit:       Optional[int],
+    resume:      bool,
 ) -> None:
 
     # ── Load data ──────────────────────────────────────────────────────────
@@ -173,21 +145,15 @@ def main(
         return
 
     # ── Build LangChain components ─────────────────────────────────────────
-    store   = VectorStoreIndex(index_dir)
-    counter = _TokenCounter()
-    llm     = ChatOpenAI(
-        model=LLM_MODEL,
-        temperature=0,
-        callbacks=[counter],
-    )
+    store = VectorStoreIndex(index_dir)
+    llm   = ChatOpenAI(model=LLM_MODEL, temperature=0)
     prompt = PromptTemplate(
         input_variables=["context", "question"],
         template=PROMPT_TEMPLATE,
     )
 
-    # Placeholder retriever — will be replaced per question in run_one()
+    # Placeholder retriever — replaced per question inside run_one()
     dummy_retriever = store.as_retriever(question_id=records_todo[0]["id"], k=k)
-
     chain = RetrievalQA.from_chain_type(
         llm=llm,
         chain_type="stuff",
@@ -197,24 +163,27 @@ def main(
 
     # ── Run ────────────────────────────────────────────────────────────────
     results = list(existing_results)
+    new_results: List[Dict[str, Any]] = []
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     for record in tqdm(records_todo, desc="[NaiveRAG]"):
-        result = run_one(record, store, chain, counter, k)
+        result = run_one(record, store, chain, k)
         results.append(result)
+        new_results.append(result)
 
-        # Incremental save after every question (safe against crashes)
+        # Incremental save — safe against crashes
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
 
-    # ── Summary ────────────────────────────────────────────────────────────
-    n = len(results)
-    avg_tokens  = sum(r["tokens_total"] for r in results) / n
-    avg_latency = sum(r["latency_s"]    for r in results) / n
-    print(f"\n[NaiveRAG] Done — {n} questions")
-    print(f"  Avg tokens / question : {avg_tokens:.0f}")
-    print(f"  Avg latency / question: {avg_latency:.2f}s")
-    print(f"  Output saved → {output_path}")
+    # ── Summary (current run only) ─────────────────────────────────────────
+    if new_results:
+        n = len(new_results)
+        avg_tokens  = sum(r["tokens_total"] for r in new_results) / n
+        avg_latency = sum(r["latency_s"]    for r in new_results) / n
+        print(f"\n[NaiveRAG] Done — {n} new questions processed")
+        print(f"  Avg tokens / question : {avg_tokens:.0f}")
+        print(f"  Avg latency / question: {avg_latency:.2f}s")
+    print(f"  Total saved: {len(results)} | Output → {output_path}")
 
 
 if __name__ == "__main__":
