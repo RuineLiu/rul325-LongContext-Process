@@ -30,8 +30,12 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
+# Must be set before faiss is imported — macOS ships multiple OpenMP runtimes
+# (one from numpy, one from faiss-cpu) which conflict on initialisation.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import numpy as np
-from langchain.schema import Document
+from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from dotenv import load_dotenv
 
@@ -201,10 +205,10 @@ class VectorStoreIndex:
         k_actual   = min(k, n_passages)
 
         # Build a flat (exact) FAISS index for this question's passage pool
+        # Use IndexFlatIP (inner product) which equals cosine similarity on L2-normed vectors
         dim   = sub_embeddings.shape[1]
-        index = faiss.IndexFlatIP(dim)  # inner-product = cosine sim on L2-normed vecs
-        faiss.normalize_L2(sub_embeddings.copy())  # normalize for cosine similarity
-        norms = np.linalg.norm(sub_embeddings, axis=1, keepdims=True)
+        index = faiss.IndexFlatIP(dim)
+        norms  = np.linalg.norm(sub_embeddings, axis=1, keepdims=True)
         normed = sub_embeddings / np.maximum(norms, 1e-9)
         index.add(normed)
 
@@ -259,8 +263,8 @@ class VectorStoreIndex:
 # ---------------------------------------------------------------------------
 
 try:
-    from langchain.schema.retriever import BaseRetriever
-    from langchain.callbacks.manager import CallbackManagerForRetrieverRun
+    from langchain_core.retrievers import BaseRetriever
+    from langchain_core.callbacks.manager import CallbackManagerForRetrieverRun
 
     class _QuestionRetriever(BaseRetriever):
         """Thin LangChain retriever bound to a single question's passage pool."""
