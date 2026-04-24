@@ -1,34 +1,11 @@
 """
-iterative_rag.py
-----------------
-System 2 — Iterative RAG (fixed N-round retrieval).
+iterative_rag.py  —  System 2: Iterative RAG (fixed N-round retrieval)
 
-Pipeline (N=2 rounds):
+Pipeline (N=2):
     Query
-      │
-      ▼
-    Round 1: Retrieve top-k  →  LLM extracts intermediate facts
-      │
-      ▼
-    Round 2: Re-query with (question + intermediate facts)  →  Retrieve top-k
-      │
-      ▼
-    LLM generates final answer from accumulated, de-duplicated context
-
-Key difference from Naive RAG: query reformulation between rounds lets the
-second retrieval fetch passages about entities identified in round 1 (the
-classic "2-hop" pattern in HotpotQA / MuSiQue).
-
-LangChain component: LCEL chain (replaces deprecated SequentialChain)
-
-Usage:
-    python src/rag/iterative_rag.py \
-        --data    data/processed/combined_2000.json \
-        --index   data/faiss_index/ \
-        --output  results/iterative_rag.json \
-        --k       3 \
-        --rounds  2 \
-        --limit   50
+      → Round 1: retrieve → LLM extracts intermediate fact
+      → Round 2: retrieve with (question + fact)
+      → LLM generates final answer from accumulated context
 """
 
 from __future__ import annotations
@@ -38,16 +15,15 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
 import json
-import os
 import sys
 import time
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from langchain.prompts import PromptTemplate
 from langchain_community.callbacks import get_openai_callback
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from tqdm import tqdm
 
@@ -56,15 +32,10 @@ load_dotenv()
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.retriever.vector_store import VectorStoreIndex
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 LLM_MODEL = "gpt-4o-mini"
 TOP_K      = 3
 N_ROUNDS   = 2
 
-# Round 1 prompt: extract the key intermediate entity/fact from initial passages
 EXTRACTION_PROMPT = PromptTemplate(
     input_variables=["passages", "question"],
     template="""\
@@ -80,7 +51,6 @@ Question: {question}
 Key intermediate fact:""",
 )
 
-# Final answer prompt: synthesize all accumulated context
 ANSWER_PROMPT = PromptTemplate(
     input_variables=["context", "question"],
     template="""\
@@ -96,33 +66,23 @@ Answer:""",
 )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _format_passages(docs: List[Document]) -> str:
-    parts = []
-    for i, doc in enumerate(docs, 1):
-        parts.append(f"[{i}] {doc.metadata['title']}\n{doc.page_content}")
-    return "\n\n".join(parts)
+    return "\n\n".join(
+        f"[{i}] {d.metadata['title']}\n{d.page_content}"
+        for i, d in enumerate(docs, 1)
+    )
 
 
 def _dedup(docs: List[Document]) -> List[Document]:
-    """Remove duplicate passages by passage_id, preserving order."""
     seen: set[str] = set()
-    out:  List[Document] = []
+    out: List[Document] = []
     for doc in docs:
-        # passage_id is always set by VectorStoreIndex — use it as the key
         pid = doc.metadata.get("passage_id") or doc.page_content[:80]
         if pid not in seen:
             seen.add(pid)
             out.append(doc)
     return out
 
-
-# ---------------------------------------------------------------------------
-# Single-question inference
-# ---------------------------------------------------------------------------
 
 def run_one(
     record: Dict[str, Any],
@@ -138,9 +98,7 @@ def run_one(
     answer_chain     = ANSWER_PROMPT     | llm | StrOutputParser()
 
     t0 = time.perf_counter()
-
     with get_openai_callback() as cb:
-        # ── Iterative retrieval ─────────────────────────────────────────
         all_docs:      List[Document] = []
         current_query: str            = question
         retrieval_steps: int          = 0
@@ -150,36 +108,20 @@ def run_one(
             retrieval_steps += 1
             all_docs = _dedup(all_docs + new_docs)
 
-            # Reformulate query between rounds (not after the last one)
             if round_idx < rounds - 1:
-                passages_text = _format_passages(all_docs)
-                intermediate  = extraction_chain.invoke({
-                    "passages": passages_text,
+                intermediate = extraction_chain.invoke({
+                    "passages": _format_passages(all_docs),
                     "question": question,
                 }).strip()
-
-                # Guard: only extend query if extraction returned something useful
                 if intermediate and intermediate.lower() != "i don't know":
                     current_query = f"{question} {intermediate}"
-                # else: keep original question for next round
 
-        # ── Final answer ────────────────────────────────────────────────
-        context   = _format_passages(all_docs)
         predicted = answer_chain.invoke({
-            "context":  context,
+            "context":  _format_passages(all_docs),
             "question": question,
         }).strip()
 
     latency = time.perf_counter() - t0
-
-    retrieved = [
-        {
-            "title":   d.metadata["title"],
-            "text":    d.page_content,
-            "is_gold": d.metadata["is_gold"],
-        }
-        for d in all_docs
-    ]
 
     return {
         "id":                 qid,
@@ -194,13 +136,12 @@ def run_one(
         "tokens_completion":  cb.completion_tokens,
         "tokens_total":       cb.total_tokens,
         "latency_s":          round(latency, 3),
-        "retrieved_passages": retrieved,
+        "retrieved_passages": [
+            {"title": d.metadata["title"], "text": d.page_content,
+             "is_gold": d.metadata["is_gold"]} for d in all_docs
+        ],
     }
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main(
     data_path:   str,
@@ -211,70 +152,56 @@ def main(
     limit:       Optional[int],
     resume:      bool,
 ) -> None:
-
     with open(data_path, encoding="utf-8") as f:
         records: List[Dict[str, Any]] = json.load(f)
     if limit:
         records = records[:limit]
-    print(f"[IterativeRAG] {len(records)} questions, {rounds} retrieval rounds, k={k}.")
+    print(f"[IterativeRAG] {len(records)} questions, {rounds} rounds, k={k}.")
 
     done_ids: set[str] = set()
-    existing_results: List[Dict[str, Any]] = []
+    existing: List[Dict[str, Any]] = []
     if resume and os.path.exists(output_path):
         with open(output_path, encoding="utf-8") as f:
-            existing_results = json.load(f)
-        done_ids = {r["id"] for r in existing_results}
+            existing = json.load(f)
+        done_ids = {r["id"] for r in existing}
         print(f"[IterativeRAG] Resuming — {len(done_ids)} already done.")
 
-    records_todo = [r for r in records if r["id"] not in done_ids]
-    if not records_todo:
+    todo = [r for r in records if r["id"] not in done_ids]
+    if not todo:
         print("[IterativeRAG] Nothing to do.")
         return
 
     store = VectorStoreIndex(index_dir)
     llm   = ChatOpenAI(model=LLM_MODEL, temperature=0)
 
-    results = list(existing_results)
-    new_results: List[Dict[str, Any]] = []
+    results = list(existing)
+    new: List[Dict[str, Any]] = []
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-    for record in tqdm(records_todo, desc="[IterativeRAG]"):
+    for record in tqdm(todo, desc="[IterativeRAG]"):
         result = run_one(record, store, llm, k, rounds)
         results.append(result)
-        new_results.append(result)
+        new.append(result)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
 
-    # ── Summary (current run only) ──────────────────────────────────────────
-    if new_results:
-        n = len(new_results)
-        avg_tokens  = sum(r["tokens_total"]    for r in new_results) / n
-        avg_steps   = sum(r["retrieval_steps"] for r in new_results) / n
-        avg_latency = sum(r["latency_s"]       for r in new_results) / n
-        print(f"\n[IterativeRAG] Done — {n} new questions processed")
-        print(f"  Avg retrieval steps   : {avg_steps:.1f}")
-        print(f"  Avg tokens / question : {avg_tokens:.0f}")
-        print(f"  Avg latency / question: {avg_latency:.2f}s")
-    print(f"  Total saved: {len(results)} | Output → {output_path}")
+    if new:
+        n = len(new)
+        print(f"\n[IterativeRAG] Done — {n} questions")
+        print(f"  Avg steps   : {sum(r['retrieval_steps'] for r in new)/n:.1f}")
+        print(f"  Avg tokens  : {sum(r['tokens_total'] for r in new)/n:.0f}")
+        print(f"  Avg latency : {sum(r['latency_s'] for r in new)/n:.2f}s")
+    print(f"  Total saved: {len(results)} → {output_path}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Iterative RAG evaluation.")
-    parser.add_argument("--data",   default="data/processed/combined_2000.json")
-    parser.add_argument("--index",  default="data/faiss_index/")
-    parser.add_argument("--output", default="results/iterative_rag.json")
-    parser.add_argument("--k",      type=int, default=TOP_K)
-    parser.add_argument("--rounds", type=int, default=N_ROUNDS)
-    parser.add_argument("--limit",  type=int, default=None)
-    parser.add_argument("--resume", action="store_true")
-    args = parser.parse_args()
-
-    main(
-        data_path=args.data,
-        index_dir=args.index,
-        output_path=args.output,
-        k=args.k,
-        rounds=args.rounds,
-        limit=args.limit,
-        resume=args.resume,
-    )
+    p = argparse.ArgumentParser()
+    p.add_argument("--data",   default="data/processed/combined_2000.json")
+    p.add_argument("--index",  default="data/faiss_index/")
+    p.add_argument("--output", default="results/iterative_rag.json")
+    p.add_argument("--k",      type=int, default=TOP_K)
+    p.add_argument("--rounds", type=int, default=N_ROUNDS)
+    p.add_argument("--limit",  type=int, default=None)
+    p.add_argument("--resume", action="store_true")
+    args = p.parse_args()
+    main(args.data, args.index, args.output, args.k, args.rounds, args.limit, args.resume)

@@ -1,0 +1,55 @@
+# =============================================================================
+# Security — NEVER commit real credentials
+# =============================================================================
+.env
+
+# =============================================================================
+# FAISS index — embeddings.npy is 176 MB (exceeds GitHub's 100 MB limit)
+# Regenerate with: python src/retriever/vector_store.py --input ... --output ...
+# =============================================================================
+data/faiss_index/
+
+# =============================================================================
+# Virtual environments
+# =============================================================================
+venv/
+.venv/
+env/
+
+# =============================================================================
+# Python cache
+# =============================================================================
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# =============================================================================
+# Jupyter — generated HTML exports, checkpoints, and auto-executed copies
+# =============================================================================
+notebooks/*.html
+notebooks/analysis_run.ipynb
+notebooks/extra_analysis_results.ipynb
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# =============================================================================
+# macOS / IDE
+# =============================================================================
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# =============================================================================
+# NOTE: the following ARE committed intentionally
+#   data/processed/          — curated datasets needed to reproduce experiments
+#   results/*.json            — experiment outputs (shows results without re-running)
+#   results/figures/          — paper figures
+#   .env.example              — template showing required env vars (no real keys)
+# =============================================================================

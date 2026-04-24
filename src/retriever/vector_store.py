@@ -273,8 +273,7 @@ try:
         question_id: str
         k:           int
 
-        class Config:
-            arbitrary_types_allowed = True
+        model_config = {"arbitrary_types_allowed": True}
 
         def _get_relevant_documents(
             self,

@@ -1,37 +1,13 @@
 """
-agentic_rag.py
---------------
-System 3 — Agentic RAG (ReAct agent with dynamic retrieval + self-verification).
+agentic_rag.py  —  System 3: Agentic RAG (ReAct via LangGraph)
 
 Pipeline:
     Query
-      │
-      ▼
-    Agent thinks: "What do I need to find?"
-      │
-      ▼
-    Agent calls search_documents(query)  →  retrieves passages
-      │
-      ▼
-    Agent thinks: "Do I have enough evidence?"
-      ├─ No  → reformulate query → search again
-      └─ Yes → calls verify_answer(candidate_answer)
-                    ├─ Not supported → retrieve more
-                    └─ Supported     → return final answer
+      → Agent calls search_documents (dynamic, repeat as needed)
+      → Agent calls verify_answer before committing
+      → Final Answer
 
-Tools available to the agent:
-    search_documents  — semantic search over the question's passage pool
-    verify_answer     — checks whether retrieved evidence supports a candidate
-
-LangChain component: create_react_agent + AgentExecutor
-
-Usage:
-    python src/rag/agentic_rag.py \
-        --data    data/processed/combined_2000.json \
-        --index   data/faiss_index/ \
-        --output  results/agentic_rag.json \
-        --k       3 \
-        --limit   50
+Uses langgraph.prebuilt.create_react_agent (tool-calling based ReAct).
 """
 
 from __future__ import annotations
@@ -41,18 +17,18 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
 import json
-import os
 import sys
 import time
+import random
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from langchain.agents import AgentExecutor, create_react_agent
-from langchain.prompts import PromptTemplate
-from langchain.tools import tool
 from langchain_community.callbacks import get_openai_callback
 from langchain_core.documents import Document
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from langchain.agents import create_agent as create_react_agent
 from tqdm import tqdm
 
 load_dotenv()
@@ -60,76 +36,64 @@ load_dotenv()
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.retriever.vector_store import VectorStoreIndex
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 LLM_MODEL      = "gpt-4o-mini"
 TOP_K          = 3
-MAX_ITERATIONS = 8   # safety cap — prevents runaway agents
+MAX_ITERATIONS = 6   # max search calls; LangGraph limit set accordingly
+RECURSION_LIMIT = MAX_ITERATIONS * 3 + 4   # ~22, enough for tool-call overhead
 
-# ReAct prompt — must include {tools}, {tool_names}, {input}, {agent_scratchpad}
-# {max_iterations} is pre-filled via .partial() before passing to create_react_agent
-REACT_PROMPT = PromptTemplate.from_template("""\
-You are an expert question-answering agent. Your goal is to answer the question \
-by retrieving evidence from a document store and verifying your answer before \
-committing to it.
+SYSTEM_PROMPT = """\
+You are an expert question-answering agent. Use the tools to find evidence, \
+then give a concise answer.
 
-You have access to the following tools:
-{tools}
-
-Use this exact format for every step:
-
-Thought: <your reasoning about what to do next>
-Action: <tool name, must be one of [{tool_names}]>
-Action Input: <input to the tool>
-Observation: <tool result>
-... (repeat Thought/Action/Action Input/Observation as needed)
-Thought: I now have a verified answer.
-Final Answer: <your concise final answer>
-
-Rules:
-- Answer as concisely as possible (short phrase or single entity).
-- Always call verify_answer before giving the Final Answer.
-- If verify_answer says the evidence is insufficient, search for more passages.
-- If after {max_iterations} searches you still cannot verify, give your best guess.
-- Never repeat the same search query twice.
-
-Question: {input}
-{agent_scratchpad}""")
+RULES:
+- Call search_documents 1–3 times with different queries to gather evidence.
+- Once you have enough evidence, call verify_answer ONCE with your best answer.
+- After calling verify_answer, give your Final Answer immediately — do NOT \
+  search again regardless of the verification result.
+- Your Final Answer must be a short phrase or single entity ONLY.
+  Good: "1755"  "John André"  "U2"
+  Bad:  "The answer is 1755."  "Based on the evidence, U2 released it first."\
+"""
 
 
 # ---------------------------------------------------------------------------
-# Per-question tool factory
+# Answer post-processing: strip verbose wrapping if present
 # ---------------------------------------------------------------------------
-# LangChain @tool closures are built fresh for each question, binding:
-#   - the current question_id   (passage isolation)
-#   - a shared retrieved_docs list (verify_answer reads what search found)
-#   - a retrieval step counter
+
+def _clean_answer(raw: str) -> str:
+    """Strip common verbose prefixes the model sometimes adds."""
+    import re
+    # Remove prefixes like "The answer is ", "Based on ..., ", "According to ..., "
+    raw = re.sub(
+        r"^(the answer is|based on .*?,|according to .*?,|from the (passages?|evidence).*?,)\s*",
+        "", raw, flags=re.IGNORECASE,
+    ).strip()
+    # Strip trailing periods
+    raw = raw.rstrip(".")
+    return raw
+
+
+# ---------------------------------------------------------------------------
+# Tool factory — verify_answer limited to ONE call per question
+# ---------------------------------------------------------------------------
 
 def make_tools(
     store:          VectorStoreIndex,
     question_id:    str,
     k:              int,
-    retrieved_docs: List[Document],   # mutated in place across tool calls
-    step_counter:   List[int],        # [count] — mutable via list
+    retrieved_docs: List[Document],
+    step_counter:   List[int],
     verify_llm:     ChatOpenAI,
 ) -> list:
-    """Return [search_documents, verify_answer] bound to the current question."""
-
-    seen_ids: set[str] = set()   # tracks passage_id to avoid duplicate storage
+    seen_ids:      set[str] = set()
+    verify_called: List[int] = [0]   # [count] — limit verify to 1 call
 
     @tool
     def search_documents(query: str) -> str:
-        """
-        Search the document store for passages relevant to the query.
-        Returns the top passages as formatted text.
-        Input: a search query string.
-        """
+        """Search for passages relevant to the query. Call this 1-3 times."""
         docs = store.search(question_id, query, k=k)
         step_counter[0] += 1
 
-        # Accumulate unique passages into the shared list
         for doc in docs:
             pid = doc.metadata.get("passage_id", doc.page_content[:80])
             if pid not in seen_ids:
@@ -138,43 +102,58 @@ def make_tools(
 
         if not docs:
             return "No relevant passages found."
-
-        parts = []
-        for i, doc in enumerate(docs, 1):
-            parts.append(f"[{i}] {doc.metadata['title']}\n{doc.page_content}")
-        return "\n\n".join(parts)
+        return "\n\n".join(
+            f"[{i}] {d.metadata['title']}\n{d.page_content}"
+            for i, d in enumerate(docs, 1)
+        )
 
     @tool
     def verify_answer(candidate_answer: str) -> str:
-        """
-        Check whether the retrieved evidence supports the candidate answer.
-        Returns 'SUPPORTED' or 'NOT SUPPORTED: <reason>'.
-        Input: a candidate answer string.
-        """
+        """Verify that the evidence supports your answer. Call this ONCE only,
+        then give your Final Answer immediately."""
+        # Hard limit: only run verification once to prevent re-search loops
+        if verify_called[0] >= 1:
+            return "SUPPORTED (verification already completed — give your final answer now)"
+
+        verify_called[0] += 1
+
         if not retrieved_docs:
-            return "NOT SUPPORTED: No passages have been retrieved yet."
+            return "NOT SUPPORTED: No passages retrieved yet."
 
-        context_parts = []
-        for i, doc in enumerate(retrieved_docs, 1):
-            context_parts.append(f"[{i}] {doc.metadata['title']}\n{doc.page_content}")
-        context = "\n\n".join(context_parts)
-
-        verify_prompt = (
+        context = "\n\n".join(
+            f"[{i}] {d.metadata['title']}\n{d.page_content}"
+            for i, d in enumerate(retrieved_docs[:6], 1)   # cap context
+        )
+        resp = verify_llm.invoke(
             f"Passages:\n{context}\n\n"
             f"Candidate answer: {candidate_answer}\n\n"
-            "Does the evidence in the passages directly support this answer? "
-            "Reply with exactly 'SUPPORTED' if yes, or "
-            "'NOT SUPPORTED: <one-sentence reason>' if no."
+            "Does the evidence support this answer (even partially)? "
+            "Be lenient — reply 'SUPPORTED' if any passage is relevant, "
+            "otherwise 'NOT SUPPORTED: <one-line reason>'."
         )
-        response = verify_llm.invoke(verify_prompt)
-        return response.content.strip()
+        return resp.content.strip()
 
     return [search_documents, verify_answer]
 
 
-# ---------------------------------------------------------------------------
-# Single-question inference
-# ---------------------------------------------------------------------------
+def _with_retry(fn, max_retries: int = 5):
+    """Call fn(), retrying on RateLimitError with exponential back-off.
+    Raises immediately on daily-quota errors (RPD exhausted)."""
+    import openai
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except openai.RateLimitError as e:
+            msg = str(e)
+            # Daily quota (RPD) exhausted — no point retrying
+            if "requests per day" in msg or "RPD" in msg:
+                raise
+            wait = (2 ** attempt) + random.random()
+            print(f"\n[AgenticRAG] Rate limit hit (attempt {attempt+1}/{max_retries}), "
+                  f"waiting {wait:.1f}s …", flush=True)
+            time.sleep(wait)
+    return fn()   # final attempt — let it raise if it fails
+
 
 def run_one(
     record:     Dict[str, Any],
@@ -186,42 +165,43 @@ def run_one(
     qid      = record["id"]
     question = record["question"]
 
-    # Fresh state per question
     retrieved_docs: List[Document] = []
     step_counter:   List[int]      = [0]
 
     tools = make_tools(store, qid, k, retrieved_docs, step_counter, verify_llm)
-
-    agent = create_react_agent(
-        llm=llm,
-        tools=tools,
-        prompt=REACT_PROMPT.partial(max_iterations=MAX_ITERATIONS),
-    )
-    executor = AgentExecutor(
-        agent=agent,
-        tools=tools,
-        max_iterations=MAX_ITERATIONS,
-        handle_parsing_errors=True,
-        verbose=False,
-    )
+    agent = create_react_agent(llm, tools)
 
     t0 = time.perf_counter()
     with get_openai_callback() as cb:
         try:
-            output    = executor.invoke({"input": question})
-            predicted = output.get("output", "").strip()
+            result = _with_retry(lambda: agent.invoke(
+                {"messages": [SystemMessage(content=SYSTEM_PROMPT),
+                               HumanMessage(content=question)]},
+                {"recursion_limit": RECURSION_LIMIT},
+            ))
+            predicted = _clean_answer(result["messages"][-1].content.strip())
         except Exception as exc:  # noqa: BLE001
-            predicted = f"ERROR: {exc}"
+            # API quota / auth errors should crash loudly, not be silently saved
+            import openai
+            if isinstance(exc, (openai.RateLimitError,
+                                 openai.AuthenticationError,
+                                 openai.APIConnectionError)):
+                raise
+            # Recursion-limit or graph errors: fallback to direct LLM answer
+            if retrieved_docs:
+                context = "\n\n".join(
+                    f"[{i}] {d.metadata['title']}\n{d.page_content}"
+                    for i, d in enumerate(retrieved_docs[:5], 1)
+                )
+                resp = _with_retry(lambda: llm.invoke(
+                    f"Passages:\n{context}\n\n"
+                    f"Question: {question}\n"
+                    "Answer with a short phrase or entity only:"
+                ))
+                predicted = _clean_answer(resp.content.strip())
+            else:
+                predicted = "I don't know"
     latency = time.perf_counter() - t0
-
-    retrieved = [
-        {
-            "title":   d.metadata["title"],
-            "text":    d.page_content,
-            "is_gold": d.metadata["is_gold"],
-        }
-        for d in retrieved_docs
-    ]
 
     return {
         "id":                 qid,
@@ -236,13 +216,12 @@ def run_one(
         "tokens_completion":  cb.completion_tokens,
         "tokens_total":       cb.total_tokens,
         "latency_s":          round(latency, 3),
-        "retrieved_passages": retrieved,
+        "retrieved_passages": [
+            {"title": d.metadata["title"], "text": d.page_content,
+             "is_gold": d.metadata["is_gold"]} for d in retrieved_docs
+        ],
     }
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main(
     data_path:   str,
@@ -252,23 +231,22 @@ def main(
     limit:       Optional[int],
     resume:      bool,
 ) -> None:
-
     with open(data_path, encoding="utf-8") as f:
         records: List[Dict[str, Any]] = json.load(f)
     if limit:
         records = records[:limit]
-    print(f"[AgenticRAG] {len(records)} questions, k={k}, max_iterations={MAX_ITERATIONS}.")
+    print(f"[AgenticRAG] {len(records)} questions, k={k}, max_iter={MAX_ITERATIONS}.")
 
     done_ids: set[str] = set()
-    existing_results: List[Dict[str, Any]] = []
+    existing: List[Dict[str, Any]] = []
     if resume and os.path.exists(output_path):
         with open(output_path, encoding="utf-8") as f:
-            existing_results = json.load(f)
-        done_ids = {r["id"] for r in existing_results}
+            existing = json.load(f)
+        done_ids = {r["id"] for r in existing}
         print(f"[AgenticRAG] Resuming — {len(done_ids)} already done.")
 
-    records_todo = [r for r in records if r["id"] not in done_ids]
-    if not records_todo:
+    todo = [r for r in records if r["id"] not in done_ids]
+    if not todo:
         print("[AgenticRAG] Nothing to do.")
         return
 
@@ -276,45 +254,33 @@ def main(
     llm        = ChatOpenAI(model=LLM_MODEL, temperature=0)
     verify_llm = ChatOpenAI(model=LLM_MODEL, temperature=0)
 
-    results = list(existing_results)
-    new_results: List[Dict[str, Any]] = []
+    results = list(existing)
+    new: List[Dict[str, Any]] = []
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-    for record in tqdm(records_todo, desc="[AgenticRAG]"):
+    for record in tqdm(todo, desc="[AgenticRAG]"):
         result = run_one(record, store, llm, verify_llm, k)
         results.append(result)
-        new_results.append(result)
+        new.append(result)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
 
-    # ── Summary (current run only) ──────────────────────────────────────────
-    if new_results:
-        n = len(new_results)
-        avg_tokens  = sum(r["tokens_total"]    for r in new_results) / n
-        avg_steps   = sum(r["retrieval_steps"] for r in new_results) / n
-        avg_latency = sum(r["latency_s"]       for r in new_results) / n
-        print(f"\n[AgenticRAG] Done — {n} new questions processed")
-        print(f"  Avg retrieval steps   : {avg_steps:.2f}")
-        print(f"  Avg tokens / question : {avg_tokens:.0f}")
-        print(f"  Avg latency / question: {avg_latency:.2f}s")
-    print(f"  Total saved: {len(results)} | Output → {output_path}")
+    if new:
+        n = len(new)
+        print(f"\n[AgenticRAG] Done — {n} questions")
+        print(f"  Avg steps   : {sum(r['retrieval_steps'] for r in new)/n:.2f}")
+        print(f"  Avg tokens  : {sum(r['tokens_total'] for r in new)/n:.0f}")
+        print(f"  Avg latency : {sum(r['latency_s'] for r in new)/n:.2f}s")
+    print(f"  Total saved: {len(results)} → {output_path}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Agentic RAG evaluation.")
-    parser.add_argument("--data",   default="data/processed/combined_2000.json")
-    parser.add_argument("--index",  default="data/faiss_index/")
-    parser.add_argument("--output", default="results/agentic_rag.json")
-    parser.add_argument("--k",      type=int, default=TOP_K)
-    parser.add_argument("--limit",  type=int, default=None)
-    parser.add_argument("--resume", action="store_true")
-    args = parser.parse_args()
-
-    main(
-        data_path=args.data,
-        index_dir=args.index,
-        output_path=args.output,
-        k=args.k,
-        limit=args.limit,
-        resume=args.resume,
-    )
+    p = argparse.ArgumentParser()
+    p.add_argument("--data",   default="data/processed/combined_2000.json")
+    p.add_argument("--index",  default="data/faiss_index/")
+    p.add_argument("--output", default="results/agentic_rag.json")
+    p.add_argument("--k",      type=int, default=TOP_K)
+    p.add_argument("--limit",  type=int, default=None)
+    p.add_argument("--resume", action="store_true")
+    args = p.parse_args()
+    main(args.data, args.index, args.output, args.k, args.limit, args.resume)

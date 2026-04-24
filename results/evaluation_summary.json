@@ -1,0 +1,203 @@
+[
+  {
+    "system": "naive_rag",
+    "overall": {
+      "n": 2000,
+      "em": 0.333,
+      "f1": 0.4396,
+      "bertscore_f1": 0.8834,
+      "retrieval_success_rate": 0.9525,
+      "avg_retrieval_steps": 1.0,
+      "avg_tokens": 454.5,
+      "avg_latency_s": 0.675
+    },
+    "by_dataset": {
+      "hotpotqa": {
+        "n": 1000,
+        "em": 0.455,
+        "f1": 0.5902,
+        "bertscore_f1": 0.914,
+        "retrieval_success_rate": 0.976,
+        "avg_retrieval_steps": 1.0,
+        "avg_tokens": 429.7,
+        "avg_latency_s": 0.674
+      },
+      "musique": {
+        "n": 1000,
+        "em": 0.211,
+        "f1": 0.289,
+        "bertscore_f1": 0.8529,
+        "retrieval_success_rate": 0.929,
+        "avg_retrieval_steps": 1.0,
+        "avg_tokens": 479.3,
+        "avg_latency_s": 0.677
+      }
+    },
+    "by_hops": {
+      "2": {
+        "n": 535,
+        "em": 0.2505,
+        "f1": 0.3405,
+        "bertscore_f1": 0.8597,
+        "retrieval_success_rate": 0.9252,
+        "avg_retrieval_steps": 1.0,
+        "avg_tokens": 463.3,
+        "avg_latency_s": 0.704
+      },
+      "3": {
+        "n": 318,
+        "em": 0.1572,
+        "f1": 0.2386,
+        "bertscore_f1": 0.847,
+        "retrieval_success_rate": 0.9371,
+        "avg_retrieval_steps": 1.0,
+        "avg_tokens": 512.8,
+        "avg_latency_s": 0.66
+      },
+      "4": {
+        "n": 147,
+        "em": 0.1837,
+        "f1": 0.2106,
+        "bertscore_f1": 0.841,
+        "retrieval_success_rate": 0.9252,
+        "avg_retrieval_steps": 1.0,
+        "avg_tokens": 464.8,
+        "avg_latency_s": 0.615
+      }
+    }
+  },
+  {
+    "system": "iterative_rag",
+    "overall": {
+      "n": 2000,
+      "em": 0.402,
+      "f1": 0.5219,
+      "bertscore_f1": 0.8997,
+      "retrieval_success_rate": 0.969,
+      "avg_retrieval_steps": 2.0,
+      "avg_tokens": 984.7,
+      "avg_latency_s": 1.995
+    },
+    "by_dataset": {
+      "hotpotqa": {
+        "n": 1000,
+        "em": 0.524,
+        "f1": 0.6692,
+        "bertscore_f1": 0.929,
+        "retrieval_success_rate": 0.982,
+        "avg_retrieval_steps": 2.0,
+        "avg_tokens": 918.2,
+        "avg_latency_s": 1.987
+      },
+      "musique": {
+        "n": 1000,
+        "em": 0.28,
+        "f1": 0.3747,
+        "bertscore_f1": 0.8704,
+        "retrieval_success_rate": 0.956,
+        "avg_retrieval_steps": 2.0,
+        "avg_tokens": 1051.1,
+        "avg_latency_s": 2.003
+      }
+    },
+    "by_hops": {
+      "2": {
+        "n": 535,
+        "em": 0.3383,
+        "f1": 0.4474,
+        "bertscore_f1": 0.8812,
+        "retrieval_success_rate": 0.9551,
+        "avg_retrieval_steps": 2.0,
+        "avg_tokens": 1011.2,
+        "avg_latency_s": 2.034
+      },
+      "3": {
+        "n": 318,
+        "em": 0.2201,
+        "f1": 0.3065,
+        "bertscore_f1": 0.8604,
+        "retrieval_success_rate": 0.956,
+        "avg_retrieval_steps": 2.0,
+        "avg_tokens": 1119.7,
+        "avg_latency_s": 1.94
+      },
+      "4": {
+        "n": 147,
+        "em": 0.1973,
+        "f1": 0.2574,
+        "bertscore_f1": 0.8527,
+        "retrieval_success_rate": 0.9592,
+        "avg_retrieval_steps": 2.0,
+        "avg_tokens": 1047.9,
+        "avg_latency_s": 2.023
+      }
+    }
+  },
+  {
+    "system": "agentic_rag",
+    "overall": {
+      "n": 2000,
+      "em": 0.4635,
+      "f1": 0.602,
+      "bertscore_f1": 0.9194,
+      "retrieval_success_rate": 0.991,
+      "avg_retrieval_steps": 3.243,
+      "avg_tokens": 6465.0,
+      "avg_latency_s": 6.729
+    },
+    "by_dataset": {
+      "hotpotqa": {
+        "n": 1000,
+        "em": 0.548,
+        "f1": 0.6954,
+        "bertscore_f1": 0.939,
+        "retrieval_success_rate": 0.993,
+        "avg_retrieval_steps": 2.401,
+        "avg_tokens": 4470.4,
+        "avg_latency_s": 4.72
+      },
+      "musique": {
+        "n": 1000,
+        "em": 0.379,
+        "f1": 0.5086,
+        "bertscore_f1": 0.8997,
+        "retrieval_success_rate": 0.989,
+        "avg_retrieval_steps": 4.084,
+        "avg_tokens": 8459.7,
+        "avg_latency_s": 8.738
+      }
+    },
+    "by_hops": {
+      "2": {
+        "n": 535,
+        "em": 0.4579,
+        "f1": 0.5824,
+        "bertscore_f1": 0.9088,
+        "retrieval_success_rate": 0.9794,
+        "avg_retrieval_steps": 3.518,
+        "avg_tokens": 7278.2,
+        "avg_latency_s": 8.661
+      },
+      "3": {
+        "n": 318,
+        "em": 0.2799,
+        "f1": 0.4397,
+        "bertscore_f1": 0.8858,
+        "retrieval_success_rate": 1.0,
+        "avg_retrieval_steps": 4.28,
+        "avg_tokens": 8957.7,
+        "avg_latency_s": 7.901
+      },
+      "4": {
+        "n": 147,
+        "em": 0.3061,
+        "f1": 0.3889,
+        "bertscore_f1": 0.8969,
+        "retrieval_success_rate": 1.0,
+        "avg_retrieval_steps": 5.721,
+        "avg_tokens": 11682.3,
+        "avg_latency_s": 10.827
+      }
+    }
+  }
+]
