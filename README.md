@@ -1,324 +1,298 @@
 # From RAG to Agentic RAG: A Comparative Study on Multi-hop Question Answering
 
-> **Course Final Project — Large Language Models**
+> **Course Final Project — Large Language Models**  
 > Topic: Retrieval-Augmented Generation & LLM Agents
 
 ---
 
 ## Table of Contents
 
-1. [Problem Statement](#1-problem-statement)
-2. [Related Work](#2-related-work)
-3. [Dataset](#3-dataset)
-4. [Methodology](#4-methodology)
-5. [Evaluation](#5-evaluation)
+1. [Project Description](#1-project-description)
+2. [Data Sources](#2-data-sources)
+3. [Required Packages](#3-required-packages)
+4. [How to Run](#4-how-to-run)
+5. [Results](#5-results)
 6. [Project Structure](#6-project-structure)
-7. [Installation & Setup](#7-installation--setup)
-8. [How to Run](#8-how-to-run)
-9. [Results](#9-results)
-10. [References](#10-references)
+7. [References](#7-references)
 
 ---
 
-## 1. Problem Statement
+## 1. Project Description
 
 ### Background
 
-Retrieval-Augmented Generation (RAG) has become the dominant paradigm for grounding Large Language Model (LLM) responses in external knowledge. By retrieving relevant documents at inference time, RAG reduces hallucination and enables the model to answer questions beyond its training knowledge cutoff.
+Retrieval-Augmented Generation (RAG) grounds Large Language Model (LLM) responses in external knowledge by retrieving relevant documents at inference time, reducing hallucination and extending the model's effective knowledge beyond its training cutoff.
 
-However, standard RAG follows a rigid **single-shot retrieval** pipeline:
+Standard RAG follows a rigid **single-shot retrieval** pipeline:
 
 ```
 Query → Retrieve (once) → Concatenate → Generate Answer
 ```
 
-This design has a critical limitation: **it assumes a single retrieval step is always sufficient**. For simple, factoid questions (e.g., *"Who directed Inception?"*), this works well. But for **multi-hop questions** that require synthesizing information across multiple documents (e.g., *"What year was the university where Einstein worked founded?"*), a single retrieval pass often misses key intermediate facts, leading to incorrect or incomplete answers.
+This design has a critical limitation for **multi-hop questions** — questions that require synthesizing information across multiple documents (e.g., *"What year was the university where Einstein worked founded?"*). A single retrieval pass often misses key intermediate facts, leading to incorrect answers.
 
-### The Core Challenge
+### What This Project Does
 
-Multi-hop reasoning requires the model to:
-1. Identify what is known from the first retrieved document
-2. Formulate a follow-up query based on that partial knowledge
-3. Retrieve additional evidence iteratively
-4. Synthesize all retrieved pieces into a final answer
+We implement and systematically compare **three RAG paradigms** of increasing sophistication on multi-hop QA benchmarks:
 
-Standard RAG cannot do this — it has no mechanism for iterative retrieval or self-directed reasoning.
+| System | Description |
+|--------|-------------|
+| **Naive RAG** | Single-shot retrieve-then-read: retrieve top-k passages once, generate answer |
+| **Iterative RAG** | Fixed 2-round retrieval: first round finds intermediate facts, second round refines |
+| **Agentic RAG** | LangGraph ReAct agent that dynamically decides when/what to retrieve and self-verifies its answer |
 
 ### Research Questions
 
-This project investigates the following questions:
+- **RQ1**: How does standard RAG perform on multi-hop questions compared to simple questions?
+- **RQ2**: Does Agentic RAG — with iterative retrieval and self-verification — outperform Naive RAG on multi-hop QA?
+- **RQ3**: What is the cost-accuracy trade-off across the three paradigms?
 
-- **RQ1**: How does standard RAG perform on multi-hop questions compared to single-hop questions?
-- **RQ2**: Does an Agentic RAG system — capable of iterative retrieval and self-verification — outperform standard RAG on multi-hop QA?
-- **RQ3**: What is the cost-accuracy trade-off between Naive RAG, Iterative RAG, and Agentic RAG in terms of retrieval steps and token consumption?
+### Key Findings
 
----
-
-## 2. Related Work
-
-### 2.1 Retrieval-Augmented Generation (RAG)
-
-**Lewis et al. (2020)** introduced RAG as a general framework combining a parametric memory (the LLM) with a non-parametric memory (a dense retrieval index). The original RAG model retrieves the top-k passages using a DPR retriever and conditions generation on them. This established the retrieve-then-read paradigm that underpins most modern RAG systems.
-
-**Limitation addressed by our work**: The original RAG performs only a single retrieval step, which is insufficient for multi-hop reasoning tasks.
-
-### 2.2 ReAct — Reasoning + Acting
-
-**Yao et al. (2023)** proposed ReAct, a framework that interleaves chain-of-thought reasoning with action execution (e.g., search, lookup). The model generates reasoning traces and actions in a unified sequence, enabling it to dynamically retrieve information based on intermediate conclusions. ReAct demonstrated significant improvements on multi-hop QA benchmarks including HotpotQA.
-
-**Relevance**: Our Agentic RAG implementation adopts the ReAct paradigm, where the LLM agent decides *when* and *what* to retrieve.
-
-### 2.3 Self-RAG
-
-**Asai et al. (2023)** proposed Self-RAG, which trains the model to adaptively retrieve and critically evaluate retrieved passages through special reflection tokens (Retrieve, ISREL, ISSUP, ISUSE). The model learns to retrieve only when necessary and to filter out irrelevant passages.
-
-**Relevance**: Self-RAG motivates our self-verification component in Agentic RAG, where the agent evaluates whether retrieved evidence is sufficient before generating a final answer.
-
-### 2.4 Iterative and Adaptive Retrieval
-
-**Trivedi et al. (2022)** proposed IRCoT (Interleaving Retrieval with Chain-of-Thought), which alternates between generating a reasoning step and retrieving relevant documents. This demonstrates that tightly coupling retrieval with reasoning substantially improves multi-hop performance.
-
-**Shao et al. (2023)** introduced FLARE (Forward-Looking Active REtrieval), which proactively decides when to retrieve by monitoring the model's confidence in its own generation.
-
-**Relevance**: These works validate the iterative retrieval paradigm and inform the design of our Agentic RAG agent.
-
-### 2.5 RAG Survey
-
-**Gao et al. (2023)** provided a comprehensive survey categorizing RAG into Naive RAG, Advanced RAG, and Modular RAG. This taxonomy directly informs our experimental design, where we implement and compare systems across these three categories.
-
-### Summary of Related Work
-
-| Work | Key Contribution | Limitation |
-|------|-----------------|------------|
-| Lewis et al. (2020) | Foundational RAG framework | Single-step retrieval only |
-| Yao et al. (2023) ReAct | Interleaved reasoning and retrieval | Requires capable base LLM |
-| Asai et al. (2023) Self-RAG | Self-reflective retrieval | Requires fine-tuned model |
-| Trivedi et al. (2022) IRCoT | CoT-guided iterative retrieval | Specialized for multi-hop only |
-| Gao et al. (2023) | RAG taxonomy and survey | No empirical comparison |
-| **Ours** | **Systematic comparison of RAG paradigms on multi-hop QA using LangChain** | — |
+- All three metrics (EM, Token F1, BERTScore) improve consistently: **Naive < Iterative < Agentic**
+- Agentic RAG's advantage grows with question complexity: **+9.3pp on 2-hop HotpotQA, +16.8pp on 2–4-hop MuSiQue**
+- The trade-off: Agentic uses **14× more tokens** than Naive (6,465 vs 454 per question)
+- Iterative RAG offers the best cost-efficiency: **2× token cost for +7pp EM gain**
 
 ---
 
-## 3. Dataset
+## 2. Data Sources
 
-We evaluate on two complementary multi-hop QA benchmarks, totalling **2,000 examples**.
+We evaluate on two complementary multi-hop QA benchmarks totalling **2,000 examples**, sampled from HuggingFace Datasets.
 
-### 3.1 HotpotQA (Primary Benchmark)
+### HotpotQA
 
 | Property | Detail |
 |----------|--------|
-| **Source** | Yang et al. (2018), Stanford / CMU |
-| **Setting** | Distractor setting |
-| **Split used** | Validation |
-| **Size** | 1,000 examples (randomly sampled) |
-| **Task type** | 2-hop open-domain QA |
-| **Paragraphs per example** | 10 (2 gold + 8 distractors) |
-| **Link** | https://huggingface.co/datasets/hotpot_qa |
+| **Paper** | Yang et al., EMNLP 2018 |
+| **HuggingFace** | [`hotpot_qa`](https://huggingface.co/datasets/hotpot_qa) |
+| **Setting** | Distractor setting, validation split |
+| **Size used** | 1,000 examples (randomly sampled) |
+| **Task** | 2-hop open-domain QA |
+| **Passages per question** | 10 (2 gold + 8 distractors) |
 
-HotpotQA is specifically designed for multi-hop reasoning. Each example consists of:
-- A question requiring **two-hop reasoning** across two Wikipedia paragraphs
-- **10 candidate paragraphs**: 2 gold (containing the answer evidence) + 8 distractors
-- Gold answer and supporting fact annotations
+Each question requires reasoning across exactly **two Wikipedia paragraphs**. The 8 distractor paragraphs are designed to mislead retrieval systems.
 
 **Example**:
 ```
-Question: "In what year was the university where Sergei Tokarev was a professor founded?"
-Gold paragraphs:
-  [1] "Sergei Tokarev ... professor at Lomonosov Moscow State University ..."
-  [2] "Lomonosov Moscow State University ... founded in 1755 ..."
+Q: "In what year was the university where Sergei Tokarev was a professor founded?"
+Hop 1: Sergei Tokarev → professor at Lomonosov Moscow State University
+Hop 2: Lomonosov Moscow State University → founded in 1755
 Answer: 1755
 ```
 
-### 3.2 MuSiQue (Challenging Benchmark)
+### MuSiQue
 
 | Property | Detail |
 |----------|--------|
-| **Source** | Trivedi et al. (2022), Allen AI |
-| **Setting** | Answerable split |
-| **Split used** | Validation |
-| **Size** | 1,000 examples (randomly sampled) |
-| **Task type** | 2–4-hop open-domain QA |
-| **Paragraphs per example** | 20 (2–4 gold + rest distractors) |
-| **Link** | https://huggingface.co/datasets/dgslibisey/MuSiQue |
+| **Paper** | Trivedi et al., TACL 2022 |
+| **HuggingFace** | [`dgslibisey/MuSiQue`](https://huggingface.co/datasets/dgslibisey/MuSiQue) |
+| **Setting** | Answerable split, validation |
+| **Size used** | 1,000 examples (randomly sampled) |
+| **Task** | 2–4-hop open-domain QA |
+| **Passages per question** | 20 (2–4 gold + rest distractors) |
 
-MuSiQue extends the difficulty of HotpotQA in two key ways: questions require up to **4 reasoning hops**, and the distractor pool is larger (20 paragraphs vs. 10). Questions are constructed by composing single-hop sub-questions, making them harder to shortcut.
+MuSiQue extends difficulty in two ways: questions require up to **4 reasoning hops**, and the distractor pool is larger. Hop distribution in our sample:
 
-**Hop distribution in our sample**:
 | Hops | Count | % |
 |------|-------|---|
 | 2 | 535 | 53.5% |
 | 3 | 318 | 31.8% |
 | 4 | 147 | 14.7% |
 
-### 3.3 Why These Two Datasets?
+### Why These Two Datasets?
 
-| Criterion | HotpotQA | MuSiQue |
-|-----------|----------|---------|
-| Established benchmark | ✅ Widely cited since 2018 | ✅ Recent, increasingly adopted |
-| Real Wikipedia passages | ✅ | ✅ |
-| Fixed 2-hop difficulty | ✅ Good for baseline | ❌ Variable (more realistic) |
-| Variable hop count | ❌ | ✅ Enables difficulty analysis |
-| Distractor density | Medium (8 distractors) | High (16–18 distractors) |
-
-Together, they allow us to measure not only whether Agentic RAG outperforms Naive RAG, but also **how performance gaps widen as reasoning complexity increases**.
+HotpotQA provides a well-established 2-hop baseline; MuSiQue adds variable hop counts (2–4), enabling analysis of **how performance gaps widen as reasoning complexity increases**.
 
 ---
 
-## 4. Methodology
+## 3. Required Packages
 
-### System Overview
+Python **3.9+** and an **OpenAI API key** are required.
 
-We implement and compare **three RAG paradigms** of increasing sophistication, all built with LangChain:
+Install all dependencies with:
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     Query (Question)                     │
-└───────────────────┬─────────────────────────────────────┘
-                    │
-        ┌───────────┼───────────┐
-        ▼           ▼           ▼
-   Naive RAG   Iterative   Agentic RAG
-               RAG
-        │           │           │
-        ▼           ▼           ▼
-    Answer      Answer      Answer
+```bash
+pip install -r requirements.txt
 ```
 
-### 4.1 Shared Infrastructure
+Full package list:
 
-**Vector Store**: All systems share the same retrieval backend — passages from each dataset are embedded using `text-embedding-3-small` and indexed in FAISS for efficient similarity search. Separate indexes are built for HotpotQA and MuSiQue to ensure per-question passage isolation.
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `openai` | ≥1.0 | OpenAI API client |
+| `langchain` | ≥0.2 | RAG orchestration framework |
+| `langchain-openai` | ≥0.1 | LangChain × OpenAI integration |
+| `langchain-community` | ≥0.2 | Callbacks (token counting) |
+| `langgraph` | ≥0.1 | ReAct agent for Agentic RAG |
+| `faiss-cpu` | ≥1.7.4 | Vector similarity search |
+| `sentence-transformers` | ≥2.2 | Sentence embeddings (BERTScore) |
+| `transformers` | ≥4.30 | RoBERTa model for BERTScore |
+| `torch` | ≥2.0 | Backend for transformers |
+| `bert-score` | ≥0.3.13 | Semantic similarity evaluation |
+| `datasets` | ≥2.14 | HuggingFace dataset loading |
+| `numpy` | ≥1.24 | Numerical operations |
+| `pandas` | ≥2.0 | Results analysis |
+| `matplotlib` | ≥3.7 | Plotting |
+| `seaborn` | ≥0.12 | Statistical visualization |
+| `scipy` | ≥1.10 | Paired t-test (significance testing) |
+| `tqdm` | ≥4.65 | Progress bars |
+| `python-dotenv` | ≥1.0 | Load `.env` API key |
+| `jupyter` | ≥1.0 | Interactive notebook analysis |
+| `ipykernel` | ≥6.0 | Jupyter kernel |
 
-**LLM Backend**: `gpt-4o-mini` for generation across all systems, ensuring fair comparison.
-
-**LangChain**: Used as the unified orchestration framework.
-
-### 4.2 Baseline — Naive RAG
-
-The standard single-shot retrieve-then-read pipeline.
-
-```
-Query
-  │
-  ▼
-Retrieve top-k passages (k=3) from FAISS
-  │
-  ▼
-Concatenate passages + question into prompt
-  │
-  ▼
-LLM generates answer
-```
-
-**Implementation**: `LangChain RetrievalQA` chain with a custom prompt template.
-
-**Expected limitation**: For multi-hop questions, the first retrieval may return only one of the two required gold passages, leading to incomplete answers.
-
-### 4.3 System 2 — Iterative RAG
-
-Extends Naive RAG by performing multiple fixed rounds of retrieval before answering.
-
-```
-Query
-  │
-  ▼
-Round 1: Retrieve top-k → extract intermediate facts
-  │
-  ▼
-Round 2: Re-query with updated context → retrieve more
-  │
-  ▼
-(repeat N rounds)
-  │
-  ▼
-LLM generates final answer from accumulated context
-```
-
-**Implementation**: `LangChain SequentialChain` with N=2 retrieval rounds.
-
-**Expected improvement**: Two retrieval rounds allow the system to first identify an intermediate entity, then look it up explicitly.
-
-### 4.4 System 3 — Agentic RAG (Core Contribution)
-
-A LangChain ReAct agent that autonomously decides when and what to retrieve, and verifies its own answer before committing.
-
-```
-Query
-  │
-  ▼
-Agent thinks: "What do I need to find?"
-  │
-  ▼
-Agent calls Search tool → retrieves documents
-  │
-  ▼
-Agent thinks: "Do I have enough to answer?"
-     ├─ No → reformulate query → Search again
-     └─ Yes → generate answer
-              │
-              ▼
-         Self-verify: "Does the answer follow from the evidence?"
-              ├─ No → retrieve more
-              └─ Yes → return final answer
-```
-
-**Tools available to the agent**:
-- `DocumentSearch`: Semantic search over the FAISS vector store
-- `AnswerVerifier`: Checks whether the current evidence supports a candidate answer
-
-**Implementation**: `LangChain AgentExecutor` with `ReAct` prompt template and custom tools.
-
-### System Comparison
-
-| Property | Naive RAG | Iterative RAG | Agentic RAG |
-|----------|-----------|---------------|-------------|
-| Retrieval steps | 1 (fixed) | N (fixed) | Variable (dynamic) |
-| Query reformulation | No | No | Yes |
-| Self-verification | No | No | Yes |
-| LangChain component | RetrievalQA | SequentialChain | AgentExecutor |
-| Token overhead | 1× | ~2× | Variable |
-| Framework | LangChain | LangChain | LangChain |
+> **macOS note**: `faiss-cpu` and `numpy` each ship their own OpenMP runtime, which can conflict. The code automatically sets `KMP_DUPLICATE_LIB_OK=TRUE` to suppress this.
 
 ---
 
-## 5. Evaluation
+## 4. How to Run
 
-### 5.1 Accuracy Metrics
+### Quick Setup
 
-**Exact Match (EM)**
+```bash
+# 1. Clone the repository
+git clone https://github.com/RuineLiu/rul325-Retrieval-Augmented-Generation-LLM-Agents.git
+cd rul325-Retrieval-Augmented-Generation-LLM-Agents
+
+# 2. Create and activate a virtual environment
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Add your OpenAI API key
+cp .env.example .env
+# Edit .env and set: OPENAI_API_KEY=sk-...
 ```
-EM = 1  if  normalize(predicted) == normalize(gold)
-EM = 0  otherwise
-(normalization: lowercase, strip punctuation and articles)
+
+---
+
+### Option A — Run Everything at Once (Recommended)
+
+```bash
+bash experiments/run_all.sh
 ```
 
-**Token-level F1**
+This script runs all 7 steps automatically. It skips steps that are already done (safe to re-run):
+
 ```
-F1 = 2 × Precision × Recall / (Precision + Recall)
-where overlap is computed on whitespace-tokenized strings
+Step 1: Download & preprocess datasets  (~2 min)
+Step 2: Build FAISS embedding index     (~$0.50, ~10 min)
+Step 3: Run Naive RAG                   (~$0.30, ~30 min)
+Step 4: Run Iterative RAG               (~$0.60, ~60 min)
+Step 5: Run Agentic RAG                 (~$3.00, ~2–3 hrs)
+Step 6: Evaluate (EM / F1 / BERTScore)  (~5 min)
+Step 7: Generate figures                (~1 min)
 ```
 
-**BERTScore**
-Semantic similarity between predicted and gold answers using contextual embeddings, capturing cases where surface form differs but meaning is preserved.
+**Useful flags:**
 
-### 5.2 Efficiency Metrics
+```bash
+bash experiments/run_all.sh --limit 50    # Quick smoke-test on 50 questions
+bash experiments/run_all.sh --resume      # Resume an interrupted run
+```
 
-| Metric | Description |
-|--------|-------------|
-| Avg. retrieval steps | Mean number of retrieval calls per question |
-| Avg. tokens consumed | Mean total tokens (prompt + completion) per question |
-| Latency | Mean wall-clock time per question |
+---
 
-### 5.3 Analysis Dimensions
+### Option B — Run Steps Individually
 
-**By dataset**: HotpotQA vs. MuSiQue results reported separately to assess generalization across benchmarks.
+**Step 1 — Prepare datasets**
+```bash
+python src/data/prepare_dataset.py \
+    --n_hotpot 1000 --n_musique 1000 \
+    --output_dir data/processed/
+```
 
-**By question type (HotpotQA)**: *Bridge* questions (find entity A, then look up A's property) vs. *comparison* questions (compare two entities). We report metrics separately to understand where each system excels.
+**Step 2 — Build FAISS vector index**
+```bash
+python src/retriever/vector_store.py \
+    --input  data/processed/combined_2000.json \
+    --output data/faiss_index/
+```
 
-**By hop count (MuSiQue)**: Results broken down by 2-hop, 3-hop, and 4-hop questions to quantify how performance gaps between systems widen as reasoning complexity increases.
+**Step 3 — Run RAG systems**
+```bash
+python src/rag/naive_rag.py \
+    --data  data/processed/combined_2000.json \
+    --index data/faiss_index/ \
+    --output results/naive_rag.json
 
-**Retrieval success rate**: Whether all required gold passages appeared in the retrieved context (measures retrieval quality independent of generation quality).
+python src/rag/iterative_rag.py \
+    --data  data/processed/combined_2000.json \
+    --index data/faiss_index/ \
+    --output results/iterative_rag.json
 
-**Failure analysis**: Qualitative categorization of errors — missing evidence, wrong retrieval, correct retrieval but wrong generation, etc.
+python src/rag/agentic_rag.py \
+    --data  data/processed/combined_2000.json \
+    --index data/faiss_index/ \
+    --output results/agentic_rag.json
+```
+
+Add `--resume` to any of the above to continue an interrupted run without re-processing completed questions.
+
+**Step 4 — Evaluate**
+```bash
+python src/evaluation/metrics.py --results_dir results/
+```
+
+**Step 5 — Visualize**
+```bash
+# Generate all comparison figures
+python src/visualization/plots.py \
+    --summary    results/evaluation_summary.json \
+    --output_dir results/figures/
+
+# Or open the interactive notebook
+jupyter notebook notebooks/analysis.ipynb
+jupyter notebook notebooks/extra_analysis.ipynb   # cost & retrieval quality analysis
+```
+
+---
+
+### Estimated Cost (Full 2,000-question Run)
+
+| Step | Model | Estimated Cost |
+|------|-------|----------------|
+| Build index | text-embedding-3-small | ~$0.50 |
+| Naive RAG | gpt-4o-mini | ~$0.30 |
+| Iterative RAG | gpt-4o-mini | ~$0.60 |
+| Agentic RAG | gpt-4o-mini | ~$3.00 |
+| **Total** | | **~$4.40** |
+
+> **API rate limits**: The free tier of OpenAI allows 10,000 requests/day. Agentic RAG makes ~3 requests per question, so 2,000 questions requires ~6,000 requests — likely needing 2 days if on the free tier. Use `--resume` to continue across sessions.
+
+---
+
+## 5. Results
+
+All experiments run on 2,000 questions (1,000 HotpotQA + 1,000 MuSiQue) using `gpt-4o-mini`.
+
+### Overall Performance
+
+| System | EM | Token F1 | BERTScore F1 | Retrieval Success | Avg Tokens | Avg Latency |
+|--------|-----|----------|--------------|-------------------|------------|-------------|
+| Naive RAG | 33.3% | 44.0% | 88.3% | 95.2% | 454 | 0.68s |
+| Iterative RAG | 40.2% | 52.2% | 90.0% | 96.9% | 985 | 2.00s |
+| **Agentic RAG** | **46.4%** | **60.2%** | **91.9%** | **99.1%** | 6,465 | 6.73s |
+
+### By Dataset
+
+| System | HotpotQA EM | MuSiQue EM |
+|--------|------------|-----------|
+| Naive RAG | 45.5% | 21.1% |
+| Iterative RAG | 52.4% | 28.0% |
+| **Agentic RAG** | **54.8%** | **37.9%** |
+
+Agentic RAG's gain over Naive is **+9.3pp on HotpotQA** vs **+16.8pp on MuSiQue** — demonstrating that dynamic retrieval helps most on harder, multi-hop questions.
+
+### By Hop Count (MuSiQue)
+
+| System | 2-hop EM | 3-hop EM | 4-hop EM |
+|--------|---------|---------|---------|
+| Naive RAG | 25.1% | 15.7% | 18.4% |
+| Iterative RAG | 33.8% | 22.0% | 19.7% |
+| **Agentic RAG** | **45.8%** | **28.0%** | **30.6%** |
 
 ---
 
@@ -327,164 +301,66 @@ Semantic similarity between predicted and gold answers using contextual embeddin
 ```
 rul325-Retrieval-Augmented-Generation-LLM-Agents/
 │
-├── README.md
+├── .env.example                        # Template — copy to .env and add API key
+├── requirements.txt                    # All Python dependencies
+├── experiments/
+│   └── run_all.sh                      # End-to-end experiment runner
 │
 ├── src/
 │   ├── data/
-│   │   └── prepare_dataset.py      # Download & preprocess HotpotQA + MuSiQue
-│   │
+│   │   └── prepare_dataset.py          # Download HotpotQA + MuSiQue from HuggingFace
 │   ├── retriever/
-│   │   └── vector_store.py         # FAISS index build & query interface
-│   │
+│   │   └── vector_store.py             # Build & query FAISS embedding index
 │   ├── rag/
-│   │   ├── naive_rag.py            # System 1: Naive RAG (RetrievalQA)
-│   │   ├── iterative_rag.py        # System 2: Iterative RAG (SequentialChain)
-│   │   └── agentic_rag.py          # System 3: Agentic RAG (AgentExecutor)
-│   │
+│   │   ├── naive_rag.py                # System 1: single-shot RAG
+│   │   ├── iterative_rag.py            # System 2: 2-round iterative RAG
+│   │   └── agentic_rag.py              # System 3: LangGraph ReAct agent
 │   ├── evaluation/
-│   │   └── metrics.py              # EM, F1, BERTScore, efficiency metrics
-│   │
+│   │   └── metrics.py                  # EM, Token F1, BERTScore, efficiency
 │   └── visualization/
-│       └── plots.py                # Result charts and comparison figures
-│
-├── experiments/
-│   └── run_all.sh                  # End-to-end experiment runner
-│
-├── results/                        # JSON output files per system
+│       └── plots.py                    # Comparison figures
 │
 ├── notebooks/
-│   └── analysis.ipynb              # Interactive analysis and visualization
+│   ├── analysis.ipynb                  # Main analysis (accuracy, efficiency, errors)
+│   └── extra_analysis.ipynb            # Cost-accuracy trade-off + retrieval impact
 │
 ├── data/
 │   └── processed/
-│       ├── hotpotqa_1000.json      # 1,000 HotpotQA records
-│       ├── musique_1000.json       # 1,000 MuSiQue records
-│       └── combined_2000.json      # Combined dataset (2,000 total)
+│       ├── hotpotqa_1000.json
+│       ├── musique_1000.json
+│       └── combined_2000.json
 │
-├── requirements.txt
-└── .env.example
+└── results/
+    ├── naive_rag.json
+    ├── iterative_rag.json
+    ├── agentic_rag.json
+    ├── evaluation_summary.json
+    └── figures/                        # PNG charts
 ```
 
 ---
 
-## 7. Installation & Setup
+## 7. References
 
-### Prerequisites
+1. Lewis, P., et al. (2020). **Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks.** *NeurIPS 2020.*
 
-- Python 3.9+
-- OpenAI API key
+2. Yao, S., et al. (2023). **ReAct: Synergizing Reasoning and Acting in Language Models.** *ICLR 2023.*
 
-### Steps
+3. Asai, A., et al. (2023). **Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection.** *ICLR 2024.*
 
-```bash
-# 1. Clone the repository
-git clone <repo-url>
-cd rul325-LongContext-Process
+4. Trivedi, H., et al. (2022). **Interleaving Retrieval with Chain-of-Thought Reasoning for Knowledge-Intensive Multi-Step Questions.** *ACL 2023.*
 
-# 2. Create virtual environment
-python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
+5. Gao, Y., et al. (2023). **Retrieval-Augmented Generation for Large Language Models: A Survey.** *arXiv:2312.10997.*
 
-# 3. Install dependencies
-pip install -r requirements.txt
+6. Yang, Z., et al. (2018). **HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering.** *EMNLP 2018.*
 
-# 4. Configure API key
-cp .env.example .env
-# Add your OPENAI_API_KEY to .env
-```
+7. Trivedi, H., et al. (2022). **MuSiQue: Multihop Questions via Single-hop Question Composition.** *TACL 2022.*
+
+8. Chase, H. (2022). **LangChain.** https://github.com/langchain-ai/langchain
 
 ---
 
-## 8. How to Run
-
-### Step 1 — Prepare Datasets
-
-```bash
-python src/data/prepare_dataset.py --n_hotpot 1000 --n_musique 1000 --output_dir data/processed/
-# Outputs: hotpotqa_1000.json, musique_1000.json, combined_2000.json
-```
-
-### Step 2 — Build Vector Store
-
-```bash
-python src/retriever/vector_store.py --input data/processed/combined_2000.json --output data/faiss_index/
-```
-
-### Step 3 — Run All Systems
-
-```bash
-# Run individual systems
-python src/rag/naive_rag.py      --data data/processed/combined_2000.json --output results/naive_rag.json
-python src/rag/iterative_rag.py  --data data/processed/combined_2000.json --output results/iterative_rag.json
-python src/rag/agentic_rag.py    --data data/processed/combined_2000.json --output results/agentic_rag.json
-
-# Or run everything at once
-bash experiments/run_all.sh
-```
-
-### Step 4 — Evaluate
-
-```bash
-python src/evaluation/metrics.py --results_dir results/
-```
-
-### Step 5 — Visualize
-
-```bash
-python src/visualization/plots.py --results_dir results/
-# or
-jupyter notebook notebooks/analysis.ipynb
-```
-
----
-
-## 9. Results
-
-*To be updated after experiments.*
-
-### Expected Comparison — HotpotQA (2-hop)
-
-| System | EM | F1 | Avg. Retrieval Steps | Avg. Tokens |
-|--------|----|----|----------------------|-------------|
-| Naive RAG     | ~30% | ~40% | 1    | ~800   |
-| Iterative RAG | ~40% | ~52% | 2    | ~1,400 |
-| Agentic RAG   | ~50% | ~62% | ~2.5 | ~2,200 |
-
-### Expected Comparison — MuSiQue (2–4-hop)
-
-| System | EM (2-hop) | EM (3-hop) | EM (4-hop) |
-|--------|-----------|-----------|-----------|
-| Naive RAG     | ~25% | ~15% | ~8%  |
-| Iterative RAG | ~35% | ~25% | ~15% |
-| Agentic RAG   | ~45% | ~35% | ~22% |
-
-*Numbers are estimates based on related work. Actual results will be reported upon completion.*
-
----
-
-## 10. References
-
-1. Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V., Goyal, N., ... & Kiela, D. (2020). **Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks.** *NeurIPS 2020.*
-
-2. Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., & Cao, Y. (2023). **ReAct: Synergizing Reasoning and Acting in Language Models.** *ICLR 2023.*
-
-3. Asai, A., Wu, Z., Wang, Y., Sil, A., & Hajishirzi, H. (2023). **Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection.** *ICLR 2024.*
-
-4. Trivedi, H., Balasubramanian, N., Khot, T., & Sabharwal, A. (2022). **Interleaving Retrieval with Chain-of-Thought Reasoning for Knowledge-Intensive Multi-Step Questions.** *ACL 2023.*
-
-5. Shao, Z., Gong, Y., Shen, Y., Huang, M., Dolan, B., Jiao, J., & Chen, W. (2023). **Enhancing Retrieval-Augmented Large Language Models with Iterative Retrieval-Generation Synergy.** *EMNLP 2023.*
-
-6. Gao, Y., Xiong, Y., Gao, X., Jia, K., Pan, J., Bi, Y., ... & Wang, H. (2023). **Retrieval-Augmented Generation for Large Language Models: A Survey.** *arXiv:2312.10997.*
-
-7. Yang, Z., Qi, P., Zhang, S., Bengio, Y., Cohen, W., Salakhutdinov, R., & Manning, C. D. (2018). **HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering.** *EMNLP 2018.*
-
-8. Trivedi, H., Balasubramanian, N., Khot, T., & Sabharwal, A. (2022). **MuSiQue: Multihop Questions via Single-hop Question Composition.** *TACL 2022.*
-
-9. Chase, H. (2022). **LangChain.** GitHub. https://github.com/langchain-ai/langchain
-
----
-
-> **Author:** [Ruimeng Liu]
-> **Course:** Large Language Models — Final Project
-> **Institution:** [Lehigh University]
+> **Author:** Ruimeng Liu  
+> **Course:** Large Language Models — Final Project  
+> **Institution:** Lehigh University  
 > **Date:** 2025
